@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,9 +33,14 @@ import (
 	"github.com/open-policy-agent/opa/plugins"
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/disk"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/util/test"
+)
+
+const (
+	deltaBundleSize    = 128
+	snapshotBundleSize = 1024
 )
 
 func TestPluginOneShot(t *testing.T) {
@@ -67,7 +71,7 @@ func TestPluginOneShot(t *testing.T) {
 
 	b.Manifest.Init()
 
-	plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New()})
+	plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Size: snapshotBundleSize})
 
 	ensurePluginState(t, plugin, plugins.StateOK)
 
@@ -75,6 +79,8 @@ func TestPluginOneShot(t *testing.T) {
 		t.Fatalf("Expected to find status for %s, found nil", bundleName)
 	} else if status.Type != bundle.SnapshotBundleType {
 		t.Fatalf("expected snapshot bundle but got %v", status.Type)
+	} else if status.Size != snapshotBundleSize {
+		t.Fatalf("expected snapshot bundle size %d but got %d", snapshotBundleSize, status.Size)
 	}
 
 	txn := storage.NewTransactionOrDie(ctx, manager.Store)
@@ -395,7 +401,7 @@ func TestPluginOneShotDeltaBundle(t *testing.T) {
 	p2 := bundle.PatchOperation{
 		Op:    "upsert",
 		Path:  "/a/foo",
-		Value: []string{"hello", "world"},
+		Value: []interface{}{"hello", "world"},
 	}
 
 	b2 := bundle.Bundle{
@@ -404,7 +410,7 @@ func TestPluginOneShotDeltaBundle(t *testing.T) {
 		Etag:     "foo",
 	}
 
-	plugin.process(ctx, bundleName, download.Update{Bundle: &b2, Metrics: metrics.New()})
+	plugin.process(ctx, bundleName, download.Update{Bundle: &b2, Metrics: metrics.New(), Size: deltaBundleSize})
 
 	ensurePluginState(t, plugin, plugins.StateOK)
 
@@ -412,6 +418,8 @@ func TestPluginOneShotDeltaBundle(t *testing.T) {
 		t.Fatalf("Expected to find status for %s, found nil", bundleName)
 	} else if status.Type != bundle.DeltaBundleType {
 		t.Fatalf("expected delta bundle but got %v", status.Type)
+	} else if status.Size != deltaBundleSize {
+		t.Fatalf("expected delta bundle size %d but got %d", deltaBundleSize, status.Size)
 	}
 
 	txn := storage.NewTransactionOrDie(ctx, manager.Store)
@@ -420,25 +428,27 @@ func TestPluginOneShotDeltaBundle(t *testing.T) {
 	ids, err := manager.Store.ListPolicies(ctx, txn)
 	if err != nil {
 		t.Fatal(err)
-	} else if len(ids) != 1 {
-		t.Fatal("Expected 1 policy")
+	}
+	if len(ids) != 1 {
+		t.Fatalf("Expected 1 policy, got %d", len(ids))
 	}
 
 	bs, err := manager.Store.GetPolicy(ctx, txn, ids[0])
-	exp := []byte("package a\n\ncorge=1")
 	if err != nil {
 		t.Fatal(err)
-	} else if !bytes.Equal(bs, exp) {
+	}
+	exp := []byte("package a\n\ncorge=1")
+	if !bytes.Equal(bs, exp) {
 		t.Fatalf("Bad policy content. Exp:\n%v\n\nGot:\n\n%v", string(exp), string(bs))
 	}
 
 	data, err := manager.Store.Read(ctx, txn, storage.Path{})
-	expData := util.MustUnmarshalJSON([]byte(`{"a": {"baz": "bux", "foo": ["hello", "world"]}, "system": {"bundles": {"test-bundle": {"etag": "foo", "manifest": {"revision": "delta", "roots": ["a"]}}}}}`))
-
 	if err != nil {
 		t.Fatal(err)
-	} else if !reflect.DeepEqual(data, expData) {
-		t.Fatalf("Bad data content. Exp:\n%v\n\nGot:\n\n%v", expData, data)
+	}
+	expData := util.MustUnmarshalJSON([]byte(`{"a": {"baz": "bux", "foo": ["hello", "world"]}, "system": {"bundles": {"test-bundle": {"etag": "foo", "manifest": {"revision": "delta", "roots": ["a"]}}}}}`))
+	if !reflect.DeepEqual(data, expData) {
+		t.Fatalf("Bad data content. Exp:\n%#v\n\nGot:\n\n%#v", expData, data)
 	}
 }
 
@@ -525,12 +535,7 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "test-bundle"
 	bundleSource := Source{
@@ -559,7 +564,6 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 
 	// download a bundle and persist to disk. Then verify the bundle persisted to disk
 	module := "package foo\n\ncorge=1"
-
 	b := bundle.Bundle{
 		Manifest: bundle.Manifest{Revision: "quickbrownfaux"},
 		Data:     util.MustUnmarshalJSON([]byte(`{"foo": {"bar": 1, "baz": "qux"}}`)).(map[string]interface{}),
@@ -575,6 +579,7 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 	}
 
 	b.Manifest.Init()
+	expBndl := b.Copy() // We're opting out of roundtripping in storage/inmem, so we copy ourselves.
 
 	var buf bytes.Buffer
 	if err := bundle.NewWriter(&buf).UseModulePath(true).Write(b); err != nil {
@@ -590,8 +595,8 @@ func TestPluginOneShotBundlePersistence(t *testing.T) {
 		t.Fatal("unexpected error:", err)
 	}
 
-	if !result.Equal(b) {
-		t.Fatal("expected the downloaded bundle to be equal to the one loaded from disk")
+	if !result.Equal(expBndl) {
+		t.Fatalf("expected the downloaded bundle to be equal to the one loaded from disk: result=%v, exp=%v", result, expBndl)
 	}
 
 	// simulate a bundle download error and verify that the bundle on disk is activated
@@ -631,12 +636,7 @@ func TestPluginOneShotSignedBundlePersistence(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "test-bundle"
 	vc := bundle.NewVerificationConfig(map[string]*bundle.KeyConfig{"foo": {Key: "secret", Algorithm: "HS256"}}, "foo", "", nil)
@@ -684,6 +684,8 @@ func TestPluginOneShotSignedBundlePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal("unexpected error:", err)
 	}
+	// We've opted out of having storage/inmem roundtrip our data, so we need to copy ourselves.
+	expBndl := b.Copy()
 
 	plugin.oneShot(ctx, bundleName, download.Update{Bundle: &b, Metrics: metrics.New(), Raw: &dup})
 
@@ -695,7 +697,7 @@ func TestPluginOneShotSignedBundlePersistence(t *testing.T) {
 		t.Fatal("unexpected error:", err)
 	}
 
-	if !result.Equal(b) {
+	if !result.Equal(expBndl) {
 		t.Fatal("expected the downloaded bundle to be equal to the one loaded from disk")
 	}
 
@@ -730,12 +732,7 @@ func TestLoadAndActivateBundlesFromDisk(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "test-bundle"
 	bundleSource := Source{
@@ -777,7 +774,7 @@ func TestLoadAndActivateBundlesFromDisk(t *testing.T) {
 		t.Fatal("unexpected error:", err)
 	}
 
-	err = plugin.saveBundleToDisk(bundleName, &buf)
+	err := plugin.saveBundleToDisk(bundleName, &buf)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -815,12 +812,7 @@ func TestLoadAndActivateDepBundlesFromDisk(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "test-bundle-main"
 	bundleSource := Source{
@@ -892,7 +884,7 @@ is_one(x) {
 		t.Fatal("unexpected error:", err)
 	}
 
-	err = plugin.saveBundleToDisk(bundleName, &buf1)
+	err := plugin.saveBundleToDisk(bundleName, &buf1)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -924,12 +916,7 @@ func TestLoadAndActivateDepBundlesFromDiskMaxAttempts(t *testing.T) {
 	ctx := context.Background()
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "test-bundle-main"
 	bundleSource := Source{
@@ -973,7 +960,7 @@ allow {
 		t.Fatal("unexpected error:", err)
 	}
 
-	err = plugin.saveBundleToDisk(bundleName, &buf)
+	err := plugin.saveBundleToDisk(bundleName, &buf)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -1413,7 +1400,7 @@ func validateStatus(t *testing.T, actual Status, expected string, expectStatusEr
 	if expectStatusErr && !isErrStatus(actual) {
 		t.Errorf("Expected status to be in an error state, but no error has occurred.")
 	} else if !expectStatusErr && isErrStatus(actual) {
-		t.Errorf("Unexpected error status %s", actual)
+		t.Errorf("Unexpected error status %v", actual)
 	}
 
 	if actual.ActiveRevision != expected {
@@ -2411,36 +2398,27 @@ func TestSaveBundleToDiskNew(t *testing.T) {
 
 	manager := getTestManager()
 
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundles := map[string]*Source{}
 	plugin := New(&Config{Bundles: bundles}, manager)
 	plugin.bundlePersistPath = filepath.Join(dir, ".opa")
 
-	err = plugin.saveBundleToDisk("foo", getTestRawBundle(t))
+	err := plugin.saveBundleToDisk("foo", getTestRawBundle(t))
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 }
 
 func TestSaveBundleToDiskNewConfiguredPersistDir(t *testing.T) {
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	manager := getTestManager()
 	manager.Config.PersistenceDirectory = &dir
 	bundles := map[string]*Source{}
 	plugin := New(&Config{Bundles: bundles}, manager)
 
-	err = plugin.Start(context.Background())
+	err := plugin.Start(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -2462,12 +2440,7 @@ func TestSaveBundleToDiskOverWrite(t *testing.T) {
 	manager := getTestManager()
 
 	// test to check existing bundle is replaced
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundles := map[string]*Source{}
 	plugin := New(&Config{Bundles: bundles}, manager)
@@ -2476,7 +2449,7 @@ func TestSaveBundleToDiskOverWrite(t *testing.T) {
 	bundleName := "foo"
 	bundleDir := filepath.Join(plugin.bundlePersistPath, bundleName)
 
-	err = os.MkdirAll(bundleDir, os.ModePerm)
+	err := os.MkdirAll(bundleDir, os.ModePerm)
 	if err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
@@ -2523,12 +2496,7 @@ func TestSaveBundleToDiskOverWrite(t *testing.T) {
 }
 
 func TestSaveCurrentBundleToDisk(t *testing.T) {
-	srcDir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(srcDir)
+	srcDir := t.TempDir()
 
 	bundlePath, err := saveCurrentBundleToDisk(srcDir, getTestRawBundle(t))
 	if err != nil {
@@ -2559,12 +2527,7 @@ func TestLoadBundleFromDisk(t *testing.T) {
 	}
 
 	// create a test bundle and load it from disk
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "foo"
 	bundleDir := filepath.Join(dir, bundleName)
@@ -2595,12 +2558,7 @@ func TestLoadSignedBundleFromDisk(t *testing.T) {
 	}
 
 	// create a test signed bundle and load it from disk
-	dir, err := ioutil.TempDir("", "")
-	if err != nil {
-		t.Fatalf("unexpected error %v", err)
-	}
-
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	bundleName := "foo"
 	bundleDir := filepath.Join(dir, bundleName)
@@ -3345,7 +3303,7 @@ func writeTestBundleToDisk(t *testing.T, srcDir string, signed bool) bundle.Bund
 		t.Fatalf("unexpected error %v", err)
 	}
 
-	if err := ioutil.WriteFile(filepath.Join(srcDir, "bundle.tar.gz"), buf.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(srcDir, "bundle.tar.gz"), buf.Bytes(), 0644); err != nil {
 		t.Fatalf("unexpected error %v", err)
 	}
 

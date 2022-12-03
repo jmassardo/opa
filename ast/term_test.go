@@ -7,9 +7,12 @@ package ast
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/open-policy-agent/opa/util"
@@ -260,37 +263,6 @@ func TestObjectFilter(t *testing.T) {
 				t.Errorf("Expected:\n\n\t%s\n\nGot:\n\n\t%s\n\n", expected, actual)
 			}
 		})
-	}
-}
-
-func TestSetInsertKeepsKeysSorting(t *testing.T) {
-	keysSorted := func(s *set) func(int, int) bool {
-		return func(i, j int) bool {
-			return Compare(s.keys[i], s.keys[j]) < 0
-		}
-	}
-
-	s0 := NewSet(
-		StringTerm("d"),
-		StringTerm("b"),
-		StringTerm("a"),
-	)
-	s := s0.(*set)
-	act := sort.SliceIsSorted(s.keys, keysSorted(s))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range s.keys {
-			t.Logf("elem[%d]: %v", i, s.keys[i])
-		}
-	}
-
-	s0.Add(StringTerm("c"))
-	act = sort.SliceIsSorted(s.keys, keysSorted(s))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range s.keys {
-			t.Logf("elem[%d]: %v", i, s.keys[i])
-		}
 	}
 }
 
@@ -901,6 +873,94 @@ func TestSetCopy(t *testing.T) {
 	}
 }
 
+// Constructs a set, and then has several reader goroutines attempt to
+// concurrently iterate across it. This should pretty consistently
+// hit a race condition around sorting the underlying key slice if
+// the sorting isn't guarded properly.
+func TestSetConcurrentReads(t *testing.T) {
+	// Create array of numbers.
+	numbers := make([]*Term, 10000)
+	for i := 0; i < 10000; i++ {
+		numbers[i] = IntNumberTerm(i)
+	}
+	// Shuffle numbers array for random insertion order.
+	rand.Seed(10000)
+	rand.Shuffle(len(numbers), func(i, j int) {
+		numbers[i], numbers[j] = numbers[j], numbers[i]
+	})
+	// Build set with numbers in unsorted order.
+	s := NewSet()
+	for i := 0; i < len(numbers); i++ {
+		s.Add(numbers[i])
+	}
+	// In-place sort on numbers.
+	sort.Sort(termSlice(numbers))
+
+	// Check if race condition on key sorting is present.
+	var wg sync.WaitGroup
+	num := runtime.NumCPU()
+	wg.Add(num)
+	for i := 0; i < num; i++ {
+		go func() {
+			defer wg.Done()
+			var retrieved []*Term
+			s.Foreach(func(v *Term) {
+				retrieved = append(retrieved, v)
+			})
+			// Check for sortedness of retrieved results.
+			// This will hit a race condition around `s.sortedKeys`.
+			for n := 0; n < len(retrieved); n++ {
+				if retrieved[n] != numbers[n] {
+					t.Errorf("Expected: %v at iteration %d but got %v instead", numbers[n], n, retrieved[n])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestObjectConcurrentReads(t *testing.T) {
+	// Create array of numbers.
+	numbers := make([]*Term, 10000)
+	for i := 0; i < 10000; i++ {
+		numbers[i] = IntNumberTerm(i)
+	}
+	// Shuffle numbers array for random insertion order.
+	rand.Seed(10000)
+	rand.Shuffle(len(numbers), func(i, j int) {
+		numbers[i], numbers[j] = numbers[j], numbers[i]
+	})
+	// Build an object with numbers in unsorted order.
+	o := NewObject()
+	for i := 0; i < len(numbers); i++ {
+		o.Insert(numbers[i], NullTerm())
+	}
+	// In-place sort on numbers.
+	sort.Sort(termSlice(numbers))
+
+	// Check if race condition on key sorting is present.
+	var wg sync.WaitGroup
+	num := runtime.NumCPU()
+	wg.Add(num)
+	for i := 0; i < num; i++ {
+		go func() {
+			defer wg.Done()
+			var retrieved []*Term
+			o.Foreach(func(k, v *Term) {
+				retrieved = append(retrieved, k)
+			})
+			// Check for sortedness of retrieved results.
+			// This will hit a race condition around `s.sortedKeys`.
+			for n := 0; n < len(retrieved); n++ {
+				if retrieved[n] != numbers[n] {
+					t.Errorf("Expected: %v at iteration %d but got %v instead", numbers[n], n, retrieved[n])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestArrayOperations(t *testing.T) {
 
 	arr := MustParseTerm(`[1,2,3,4]`).Value.(*Array)
@@ -1100,6 +1160,53 @@ func TestValueToInterface(t *testing.T) {
 	}
 }
 
+// NOTE(sr): Without the opt-out, we don't allocate another object for
+// the conversion back to interface{} if it can be avoided. As a result,
+// the value held by the store could be changed.
+func TestJSONWithOptLazyObjDefault(t *testing.T) {
+	// would live in the store
+	m := map[string]interface{}{
+		"foo": "bar",
+	}
+	o := LazyObject(m)
+
+	n, err := JSONWithOpt(o, JSONOpt{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n0, ok := n.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %T, got %T: %[2]v", n0, n)
+	}
+	n0["baz"] = true
+
+	if v, ok := m["baz"]; !ok || !v.(bool) {
+		t.Errorf("expected change in m, found none: %v", m)
+	}
+}
+
+func TestJSONWithOptLazyObjOptOut(t *testing.T) {
+	// would live in the store
+	m := map[string]interface{}{
+		"foo": "bar",
+	}
+	o := LazyObject(m)
+
+	n, err := JSONWithOpt(o, JSONOpt{CopyMaps: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n0, ok := n.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %T, got %T: %[2]v", n0, n)
+	}
+	n0["baz"] = true
+
+	if _, ok := m["baz"]; ok {
+		t.Errorf("expected no change in m, found one: %v", m)
+	}
+}
+
 func assertTermEqual(t *testing.T, x *Term, y *Term) {
 	if !x.Equal(y) {
 		t.Errorf("Failure on equality: \n%s and \n%s\n", x, y)
@@ -1116,5 +1223,169 @@ func assertToString(t *testing.T, val Value, expected string) {
 	result := val.String()
 	if result != expected {
 		t.Errorf("Expected %v but got %v", expected, result)
+	}
+}
+
+func TestLazyObjectGet(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+		},
+	})
+	y := x.Get(StringTerm("a"))
+	_, ok := y.Value.(*lazyObj)
+	if !ok {
+		t.Errorf("expected Get() to return another lazy object, got %v %[1]T", y.Value)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectFind(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+			"d": []interface{}{true, true, true},
+		},
+	})
+	// retrieve object via Find
+	y, err := x.Find(Ref{StringTerm("a"), StringTerm("b")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok := y.(*lazyObj)
+	if !ok {
+		t.Errorf("expected Find() to return another lazy object, got %v %[1]T", y)
+	}
+	assertForced(t, x, false)
+
+	// retrieve array via Find
+	z, err := x.Find(Ref{StringTerm("a"), StringTerm("d")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok = z.(*Array)
+	if !ok {
+		t.Errorf("expected Find() to return array, got %v %[1]T", z)
+	}
+}
+
+func TestLazyObjectCopy(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+		},
+	})
+	y := x.Copy()
+	_, ok := y.(*lazyObj)
+	if !ok {
+		t.Errorf("expected Get() to return another lazy object, got %v %[1]T", y)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectLen(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+		},
+	})
+	if exp, act := 1, x.Len(); exp != act {
+		t.Errorf("expected Len() %v, got %v", exp, act)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectIsGround(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+		},
+	})
+	if exp, act := true, x.IsGround(); exp != act {
+		t.Errorf("expected IsGround() %v, got %v", exp, act)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectInsert(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": "b",
+	})
+	x.Insert(StringTerm("c"), StringTerm("d"))
+	assertForced(t, x, true)
+
+	// NOTE(sr): We compare after asserting that it was forced, since comparison
+	// forces the lazy object, too.
+	if act, exp := x, NewObject(Item(StringTerm("a"), StringTerm("b")), Item(StringTerm("c"), StringTerm("d"))); exp.Compare(act) != 0 {
+		t.Errorf("expected %v to be equal to %v", act, exp)
+	}
+}
+
+func TestLazyObjectKeys(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": "A",
+		"c": "C",
+		"b": "B",
+	})
+	act := x.Keys()
+	exp := []*Term{StringTerm("a"), StringTerm("b"), StringTerm("c")}
+	if !reflect.DeepEqual(exp, act) {
+		t.Errorf("expected Keys() %v, got %v", exp, act)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectKeysIterator(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": "A",
+		"c": "C",
+		"b": "B",
+	})
+	ki := x.KeysIterator()
+	act := make([]*Term, 0, x.Len())
+	for k, next := ki.Next(); next; k, next = ki.Next() {
+		act = append(act, k)
+	}
+	exp := []*Term{StringTerm("a"), StringTerm("b"), StringTerm("c")}
+	if !reflect.DeepEqual(exp, act) {
+		t.Errorf("expected Keys() %v, got %v", exp, act)
+	}
+	assertForced(t, x, false)
+}
+
+func TestLazyObjectCompare(t *testing.T) {
+	x := LazyObject(map[string]interface{}{
+		"a": map[string]interface{}{
+			"b": map[string]interface{}{
+				"c": true,
+			},
+		},
+	})
+	if exp, act := 1, x.Compare(NewObject()); exp != act {
+		t.Errorf("expected Compare() => %v, got %v", exp, act)
+	}
+	assertForced(t, x, true)
+}
+
+func assertForced(t *testing.T, x Object, forced bool) {
+	t.Helper()
+	l, ok := x.(*lazyObj)
+	switch {
+	case !ok:
+		t.Errorf("expected lazy object, got %v %[1]T", x)
+	case !forced && l.strict != nil:
+		t.Errorf("expected %v to not be forced", l)
+	case forced && l.strict == nil:
+		t.Errorf("expected %v to be forced", l)
 	}
 }

@@ -251,7 +251,7 @@ func (d *OCIDownloader) download(ctx context.Context, m metrics.Metrics) (*downl
 	if tarballDescriptor.MediaType == "" {
 		return nil, fmt.Errorf("no tarball descriptor found in the layers")
 	}
-	etag := string(tarballDescriptor.Digest.Hex())
+	etag := tarballDescriptor.Digest.Hex()
 	bundleFilePath := filepath.Join(d.localStorePath, "blobs", "sha256", etag)
 	// if the downloader etag sha is the same with digest of the tarball it was already loaded
 	if d.etag == etag {
@@ -322,13 +322,14 @@ func (d *OCIDownloader) pull(ctx context.Context, ref string) (*ocispec.Descript
 }
 
 func (d *OCIDownloader) getResolverHost(client *http.Client, urlInfo *url.URL) docker.RegistryHosts {
-	registryHost := docker.RegistryHost{
-		Host:         urlInfo.Host,
-		Scheme:       urlInfo.Scheme,
-		Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve | docker.HostCapabilityPush,
-		Client:       client,
-		Path:         "/v2",
-		Authorizer: docker.NewDockerAuthorizer(
+	creds := d.client.Config().Credentials
+	var auth docker.Authorizer
+	if creds.Bearer == nil {
+		auth = docker.NewDockerAuthorizer(
+			docker.WithAuthClient(client),
+		)
+	} else {
+		auth = docker.NewDockerAuthorizer(
 			docker.WithAuthClient(client),
 			docker.WithAuthCreds(func(string) (string, string, error) {
 				creds := d.client.Config().Credentials
@@ -337,7 +338,16 @@ func (d *OCIDownloader) getResolverHost(client *http.Client, urlInfo *url.URL) d
 				}
 
 				return creds.Bearer.Scheme, creds.Bearer.Token, nil
-			})),
+			}))
+	}
+
+	registryHost := docker.RegistryHost{
+		Host:         urlInfo.Host,
+		Scheme:       urlInfo.Scheme,
+		Capabilities: docker.HostCapabilityPull | docker.HostCapabilityResolve | docker.HostCapabilityPush,
+		Client:       client,
+		Path:         "/v2",
+		Authorizer:   auth,
 	}
 
 	return func(string) ([]docker.RegistryHost, error) {

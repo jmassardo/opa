@@ -52,7 +52,9 @@ type Query struct {
 	indexing               bool
 	earlyExit              bool
 	interQueryBuiltinCache cache.InterQueryCache
+	ndBuiltinCache         builtins.NDBCache
 	strictBuiltinErrors    bool
+	strictObjects          bool
 	printHook              print.Hook
 	tracingOpts            tracing.Options
 }
@@ -242,6 +244,12 @@ func (q *Query) WithInterQueryBuiltinCache(c cache.InterQueryCache) *Query {
 	return q
 }
 
+// WithNDBuiltinCache sets the non-deterministic builtin cache.
+func (q *Query) WithNDBuiltinCache(c builtins.NDBCache) *Query {
+	q.ndBuiltinCache = c
+	return q
+}
+
 // WithStrictBuiltinErrors tells the evaluator to treat all built-in function errors as fatal errors.
 func (q *Query) WithStrictBuiltinErrors(yes bool) *Query {
 	q.strictBuiltinErrors = yes
@@ -262,6 +270,15 @@ func (q *Query) WithPrintHook(h print.Hook) *Query {
 // WithDistributedTracingOpts sets the options to be used by distributed tracing.
 func (q *Query) WithDistributedTracingOpts(tr tracing.Options) *Query {
 	q.tracingOpts = tr
+	return q
+}
+
+// WithStrictObjects tells the evaluator to avoid the "lazy object" optimization
+// applied when reading objects from the store. It will result in higher memory
+// usage and should only be used temporarily while adjusting code that breaks
+// because of the optimization.
+func (q *Query) WithStrictObjects(yes bool) *Query {
+	q.strictObjects = yes
 	return q
 }
 
@@ -313,6 +330,7 @@ func (q *Query) PartialRun(ctx context.Context) (partials []ast.Body, support []
 		builtinCache:           builtins.Cache{},
 		functionMocks:          newFunctionMocksStack(),
 		interQueryBuiltinCache: q.interQueryBuiltinCache,
+		ndBuiltinCache:         q.ndBuiltinCache,
 		virtualCache:           newVirtualCache(),
 		comprehensionCache:     newComprehensionCache(),
 		saveSet:                newSaveSet(q.unknowns, b, q.instr),
@@ -329,6 +347,7 @@ func (q *Query) PartialRun(ctx context.Context) (partials []ast.Body, support []
 		earlyExit:     q.earlyExit,
 		builtinErrors: &builtinErrors{},
 		printHook:     q.printHook,
+		strictObjects: q.strictObjects,
 	}
 
 	if len(q.disableInlining) > 0 {
@@ -462,6 +481,7 @@ func (q *Query) Iter(ctx context.Context, iter func(QueryResult) error) error {
 		builtinCache:           builtins.Cache{},
 		functionMocks:          newFunctionMocksStack(),
 		interQueryBuiltinCache: q.interQueryBuiltinCache,
+		ndBuiltinCache:         q.ndBuiltinCache,
 		virtualCache:           newVirtualCache(),
 		comprehensionCache:     newComprehensionCache(),
 		genvarprefix:           q.genvarprefix,
@@ -471,6 +491,7 @@ func (q *Query) Iter(ctx context.Context, iter func(QueryResult) error) error {
 		builtinErrors:          &builtinErrors{},
 		printHook:              q.printHook,
 		tracingOpts:            q.tracingOpts,
+		strictObjects:          q.strictObjects,
 	}
 	e.caller = e
 	q.metrics.Timer(metrics.RegoQueryEval).Start()

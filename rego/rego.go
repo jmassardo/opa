@@ -19,16 +19,17 @@ import (
 	bundleUtils "github.com/open-policy-agent/opa/internal/bundle"
 	"github.com/open-policy-agent/opa/internal/compiler/wasm"
 	"github.com/open-policy-agent/opa/internal/future"
-	"github.com/open-policy-agent/opa/internal/ir"
 	"github.com/open-policy-agent/opa/internal/planner"
 	"github.com/open-policy-agent/opa/internal/rego/opa"
 	"github.com/open-policy-agent/opa/internal/wasm/encoding"
+	"github.com/open-policy-agent/opa/ir"
 	"github.com/open-policy-agent/opa/loader"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/resolver"
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/inmem"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/topdown/print"
 	"github.com/open-policy-agent/opa/tracing"
@@ -115,8 +116,10 @@ type EvalContext struct {
 	indexing               bool
 	earlyExit              bool
 	interQueryBuiltinCache cache.InterQueryCache
+	ndBuiltinCache         builtins.NDBCache
 	resolvers              []refResolver
 	sortSets               bool
+	copyMaps               bool
 	printHook              print.Hook
 	capabilities           *ast.Capabilities
 }
@@ -253,6 +256,14 @@ func EvalInterQueryBuiltinCache(c cache.InterQueryCache) EvalOption {
 	}
 }
 
+// EvalNDBuiltinCache sets the non-deterministic builtin cache that built-in functions can
+// use during evaluation.
+func EvalNDBuiltinCache(c builtins.NDBCache) EvalOption {
+	return func(e *EvalContext) {
+		e.ndBuiltinCache = c
+	}
+}
+
 // EvalResolver sets a Resolver for a specified ref path for this evaluation.
 func EvalResolver(ref ast.Ref, r resolver.Resolver) EvalOption {
 	return func(e *EvalContext) {
@@ -264,6 +275,13 @@ func EvalResolver(ref ast.Ref, r resolver.Resolver) EvalOption {
 func EvalSortSets(yes bool) EvalOption {
 	return func(e *EvalContext) {
 		e.sortSets = yes
+	}
+}
+
+// EvalCopyMaps causes the evaluator to copy `map[string]interface{}`s before returning them.
+func EvalCopyMaps(yes bool) EvalOption {
+	return func(e *EvalContext) {
+		e.copyMaps = yes
 	}
 }
 
@@ -508,6 +526,7 @@ type Rego struct {
 	bundles                map[string]*bundle.Bundle
 	skipBundleVerification bool
 	interQueryBuiltinCache cache.InterQueryCache
+	ndBuiltinCache         builtins.NDBCache
 	strictBuiltinErrors    bool
 	resolvers              []refResolver
 	schemaSet              *ast.SchemaSet
@@ -517,13 +536,15 @@ type Rego struct {
 	printHook              print.Hook
 	enablePrintStatements  bool
 	distributedTacingOpts  tracing.Options
+	strict                 bool
 }
 
 // Function represents a built-in function that is callable in Rego.
 type Function struct {
-	Name    string
-	Decl    *types.Function
-	Memoize bool
+	Name             string
+	Decl             *types.Function
+	Memoize          bool
+	Nondeterministic bool
 }
 
 // BuiltinContext contains additional attributes from the evaluator that
@@ -550,8 +571,9 @@ type (
 // RegisterBuiltin1 adds a built-in function globally inside the OPA runtime.
 func RegisterBuiltin1(decl *Function, impl Builtin1) {
 	ast.RegisterBuiltin(&ast.Builtin{
-		Name: decl.Name,
-		Decl: decl.Decl,
+		Name:             decl.Name,
+		Decl:             decl.Decl,
+		Nondeterministic: decl.Nondeterministic,
 	})
 	topdown.RegisterBuiltinFunc(decl.Name, func(bctx BuiltinContext, terms []*ast.Term, iter func(*ast.Term) error) error {
 		result, err := memoize(decl, bctx, terms, func() (*ast.Term, error) { return impl(bctx, terms[0]) })
@@ -562,8 +584,9 @@ func RegisterBuiltin1(decl *Function, impl Builtin1) {
 // RegisterBuiltin2 adds a built-in function globally inside the OPA runtime.
 func RegisterBuiltin2(decl *Function, impl Builtin2) {
 	ast.RegisterBuiltin(&ast.Builtin{
-		Name: decl.Name,
-		Decl: decl.Decl,
+		Name:             decl.Name,
+		Decl:             decl.Decl,
+		Nondeterministic: decl.Nondeterministic,
 	})
 	topdown.RegisterBuiltinFunc(decl.Name, func(bctx BuiltinContext, terms []*ast.Term, iter func(*ast.Term) error) error {
 		result, err := memoize(decl, bctx, terms, func() (*ast.Term, error) { return impl(bctx, terms[0], terms[1]) })
@@ -574,8 +597,9 @@ func RegisterBuiltin2(decl *Function, impl Builtin2) {
 // RegisterBuiltin3 adds a built-in function globally inside the OPA runtime.
 func RegisterBuiltin3(decl *Function, impl Builtin3) {
 	ast.RegisterBuiltin(&ast.Builtin{
-		Name: decl.Name,
-		Decl: decl.Decl,
+		Name:             decl.Name,
+		Decl:             decl.Decl,
+		Nondeterministic: decl.Nondeterministic,
 	})
 	topdown.RegisterBuiltinFunc(decl.Name, func(bctx BuiltinContext, terms []*ast.Term, iter func(*ast.Term) error) error {
 		result, err := memoize(decl, bctx, terms, func() (*ast.Term, error) { return impl(bctx, terms[0], terms[1], terms[2]) })
@@ -586,8 +610,9 @@ func RegisterBuiltin3(decl *Function, impl Builtin3) {
 // RegisterBuiltin4 adds a built-in function globally inside the OPA runtime.
 func RegisterBuiltin4(decl *Function, impl Builtin4) {
 	ast.RegisterBuiltin(&ast.Builtin{
-		Name: decl.Name,
-		Decl: decl.Decl,
+		Name:             decl.Name,
+		Decl:             decl.Decl,
+		Nondeterministic: decl.Nondeterministic,
 	})
 	topdown.RegisterBuiltinFunc(decl.Name, func(bctx BuiltinContext, terms []*ast.Term, iter func(*ast.Term) error) error {
 		result, err := memoize(decl, bctx, terms, func() (*ast.Term, error) { return impl(bctx, terms[0], terms[1], terms[2], terms[3]) })
@@ -598,8 +623,9 @@ func RegisterBuiltin4(decl *Function, impl Builtin4) {
 // RegisterBuiltinDyn adds a built-in function globally inside the OPA runtime.
 func RegisterBuiltinDyn(decl *Function, impl BuiltinDyn) {
 	ast.RegisterBuiltin(&ast.Builtin{
-		Name: decl.Name,
-		Decl: decl.Decl,
+		Name:             decl.Name,
+		Decl:             decl.Decl,
+		Nondeterministic: decl.Nondeterministic,
 	})
 	topdown.RegisterBuiltinFunc(decl.Name, func(bctx BuiltinContext, terms []*ast.Term, iter func(*ast.Term) error) error {
 		result, err := memoize(decl, bctx, terms, func() (*ast.Term, error) { return impl(bctx, terms) })
@@ -1015,6 +1041,13 @@ func InterQueryBuiltinCache(c cache.InterQueryCache) func(r *Rego) {
 	}
 }
 
+// NDBuiltinCache sets the non-deterministic builtins cache.
+func NDBuiltinCache(c builtins.NDBCache) func(r *Rego) {
+	return func(r *Rego) {
+		r.ndBuiltinCache = c
+	}
+}
+
 // StrictBuiltinErrors tells the evaluator to treat all built-in function errors as fatal errors.
 func StrictBuiltinErrors(yes bool) func(r *Rego) {
 	return func(r *Rego) {
@@ -1083,6 +1116,13 @@ func EnablePrintStatements(yes bool) func(r *Rego) {
 	}
 }
 
+// Strict enables or disables strict-mode in the compiler
+func Strict(yes bool) func(r *Rego) {
+	return func(r *Rego) {
+		r.strict = yes
+	}
+}
+
 // New returns a new Rego object.
 func New(options ...func(r *Rego)) *Rego {
 
@@ -1106,7 +1146,8 @@ func New(options ...func(r *Rego)) *Rego {
 			WithDebug(r.dump).
 			WithSchemas(r.schemaSet).
 			WithCapabilities(r.capabilities).
-			WithEnablePrintStatements(r.enablePrintStatements)
+			WithEnablePrintStatements(r.enablePrintStatements).
+			WithStrict(r.strict)
 	}
 
 	if r.store == nil {
@@ -1163,6 +1204,10 @@ func (r *Rego) Eval(ctx context.Context) (ResultSet, error) {
 		EvalTime(r.time),
 		EvalInterQueryBuiltinCache(r.interQueryBuiltinCache),
 		EvalSeed(r.seed),
+	}
+
+	if r.ndBuiltinCache != nil {
+		evalArgs = append(evalArgs, EvalNDBuiltinCache(r.ndBuiltinCache))
 	}
 
 	for _, qt := range r.queryTracers {
@@ -1237,6 +1282,10 @@ func (r *Rego) Partial(ctx context.Context) (*PartialQueries, error) {
 		EvalInterQueryBuiltinCache(r.interQueryBuiltinCache),
 	}
 
+	if r.ndBuiltinCache != nil {
+		evalArgs = append(evalArgs, EvalNDBuiltinCache(r.ndBuiltinCache))
+	}
+
 	for _, t := range r.queryTracers {
 		evalArgs = append(evalArgs, EvalQueryTracer(t))
 	}
@@ -1279,7 +1328,7 @@ func (r *Rego) Compile(ctx context.Context, opts ...CompileOption) (*CompileResu
 	}
 
 	var queries []ast.Body
-	var modules []*ast.Module
+	modules := make([]*ast.Module, 0, len(r.compiler.Modules))
 
 	if cfg.partial {
 
@@ -1773,6 +1822,7 @@ func (r *Rego) parseQuery(futureImports []*ast.Import, m metrics.Metrics) (ast.B
 	if err != nil {
 		return nil, err
 	}
+	popts.SkipRules = true
 	return ast.ParseBodyWithOpts(r.query, popts)
 }
 
@@ -1877,7 +1927,8 @@ func (r *Rego) compileQuery(query ast.Body, imports []*ast.Import, m metrics.Met
 	qc := r.compiler.QueryCompiler().
 		WithContext(qctx).
 		WithUnsafeBuiltins(r.unsafeBuiltins).
-		WithEnablePrintStatements(r.enablePrintStatements)
+		WithEnablePrintStatements(r.enablePrintStatements).
+		WithStrict(false)
 
 	for _, extra := range extras {
 		qc = qc.WithStageAfter(extra.after, extra.stage)
@@ -1913,6 +1964,10 @@ func (r *Rego) eval(ctx context.Context, ectx *EvalContext) (ResultSet, error) {
 
 	if !ectx.time.IsZero() {
 		q = q.WithTime(ectx.time)
+	}
+
+	if ectx.ndBuiltinCache != nil {
+		q = q.WithNDBuiltinCache(ectx.ndBuiltinCache)
 	}
 
 	for i := range ectx.queryTracers {
@@ -1970,6 +2025,7 @@ func (r *Rego) evalWasm(ctx context.Context, ectx *EvalContext) (ResultSet, erro
 		Time:                   ectx.time,
 		Seed:                   ectx.seed,
 		InterQueryBuiltinCache: ectx.interQueryBuiltinCache,
+		NDBuiltinCache:         ectx.ndBuiltinCache,
 		PrintHook:              ectx.printHook,
 		Capabilities:           ectx.capabilities,
 	})
@@ -2187,6 +2243,10 @@ func (r *Rego) partial(ctx context.Context, ectx *EvalContext) (*PartialQueries,
 
 	if !ectx.time.IsZero() {
 		q = q.WithTime(ectx.time)
+	}
+
+	if ectx.ndBuiltinCache != nil {
+		q = q.WithNDBuiltinCache(ectx.ndBuiltinCache)
 	}
 
 	for i := range ectx.queryTracers {
@@ -2520,8 +2580,9 @@ func finishFunction(name string, bctx topdown.BuiltinContext, result *ast.Term, 
 func newFunction(decl *Function, f topdown.BuiltinFunc) func(*Rego) {
 	return func(r *Rego) {
 		r.builtinDecls[decl.Name] = &ast.Builtin{
-			Name: decl.Name,
-			Decl: decl.Decl,
+			Name:             decl.Name,
+			Decl:             decl.Decl,
+			Nondeterministic: decl.Nondeterministic,
 		}
 		r.builtinFuncs[decl.Name] = &topdown.Builtin{
 			Decl: r.builtinDecls[decl.Name],
@@ -2531,5 +2592,9 @@ func newFunction(decl *Function, f topdown.BuiltinFunc) func(*Rego) {
 }
 
 func generateJSON(term *ast.Term, ectx *EvalContext) (interface{}, error) {
-	return ast.JSONWithOpt(term.Value, ast.JSONOpt{SortSets: ectx.sortSets})
+	return ast.JSONWithOpt(term.Value,
+		ast.JSONOpt{
+			SortSets: ectx.sortSets,
+			CopyMaps: ectx.copyMaps,
+		})
 }

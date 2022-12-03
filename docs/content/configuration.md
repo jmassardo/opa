@@ -88,7 +88,7 @@ Example using `BASE_URL` and `BEARER_TOKEN` environment variables:
 ```yaml
 services:
   acmecorp:
-    url: ${BASE_URL}
+    url: "${BASE_URL}"
     credentials:
       bearer:
         token: "${BEARER_TOKEN}"
@@ -254,6 +254,25 @@ multiple services.
 | `services[_].allow_insecure_tls` | `bool` | No | Allow insecure TLS. |
 | `services[_].type` | `string` | No (default: empty) | Optional parameter that allows to use an "OCI" service type. This will allow bundle and discovery plugins to download bundles from an OCI registry. |
 
+> Services can be defined as an array or object. When defined as an object, the
+> object keys override the `services[_].name` fields.
+> For example:
+> ```yaml
+> services:
+>   s1:
+>     url: https://s1/example/
+>   s2:
+>     url: https://s2/
+> ```
+> Is equivalent to
+> ```yaml
+> services:
+>   - name: s1
+>     url: https://s1/example/
+>   - name: s2
+>     url: https://s2/
+> ```
+
 Each service may optionally specify a credential mechanism by which OPA will authenticate
 itself to the service.
 
@@ -287,8 +306,7 @@ If persistence is not configured the OCI downloader will store the layers in the
 OPA will authenticate using the specified bearer token and schema; to enable bearer token
 authentication, either the token or the path to the token must be specified. If the latter is provided, on each request OPA will re-read the token from the file and use that token for authentication.
 
-The schema is optional and will default to `Bearer`
-if unspecified.
+The `scheme` attribute is optional, and will default to `Bearer` if unspecified.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -452,7 +470,6 @@ Please note that if you are using temporary IAM credentials (e.g. assumed IAM ro
 | --- | --- | --- | --- |
 | `services[_].credentials.s3_signing.environment_credentials` | `{}` | Yes | Enables AWS signing using environment variables to source the configuration and credentials |
 
-
 ##### Using Named Profile Credentials
 If specifying `profile_credentials`, OPA will expect to find the `access key id`, `secret access key` and
 `session token` from the [named profiles](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-profiles.html)
@@ -476,9 +493,9 @@ be specified as `iam_role` and `aws_region` respectively.
 To use the ECS metadata service, specify only the AWS region for the resource as `aws_region`. ECS
 containers have at most one associated IAM role.
 
-**N.B.** Providing a value for `iam_role` will cause OPA to use the EC2 metadata service even
-if running inside an ECS container. This may result in unexpected problems if, for example,
-there is no route to the EC2 metadata service from inside the container or if the IAM role is only available within the container and not from the hosting EC2 instance.
+> Providing a value for `iam_role` will cause OPA to use the EC2 metadata service even
+> if running inside an ECS container. This may result in unexpected problems if, for example,
+> there is no route to the EC2 metadata service from inside the container or if the IAM role is only available within the container and not from the hosting EC2 instance.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
@@ -486,31 +503,12 @@ there is no route to the EC2 metadata service from inside the container or if th
 | `services[_].credentials.s3_signing.metadata_credentials.iam_role` | `string` | No | The IAM role to use for the AWS signing service credential method |
 
 ##### Using EKS IAM Roles for Service Account (Web Identity) Credentials
-If specifying `web_identity_credentials`, OPA will expect to find environment variables for `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, in accordance with the convention used by the [AWS EKS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts-technical-overview.html#pod-configuration).
+If specifying `web_identity_credentials`, OPA will expect to find environment variables for `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE`, in accordance with the convention used by the [AWS EKS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html).
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `services[_].credentials.s3_signing.web_identity_credentials.aws_region` | `string` | Yes | The AWS region to use for the sts regional endpoint. Uses the global endpoint by default |
 | `services[_].credentials.s3_signing.web_identity_credentials.session_name` | `string` | No | The session name used to identify the assumed role session. Default: `open-policy-agent` |
-
-> Services can be defined as an array or object. When defined as an object, the
-> object keys override the `services[_].name` fields.
-> For example:
-```yaml
-services:
-  s1:
-    url: https://s1/example/
-  s2:
-    url: https://s2/
-```
-Is equivalent to
-```yaml
-services:
-  - name: s1
-    url: https://s1/example/
-  - name: s2
-    url: https://s2/
-```
 
 #### GCP Metadata Token
 
@@ -742,6 +740,7 @@ For *GHCR* (Github Container Registry) you can use a developer PAT (personal acc
 | `default_authorization_decision` | `string` | No (default: `/system/authz/allow`) | Set path of default authorization decision for OPA's API. |
 | `persistence_directory` | `string` | No (default `$PWD/.opa`) | Set directory to use for persistence with options like `bundles[_].persist`. |
 | `plugins` | `object` | No (default: `{}`) | Location for custom plugin configuration. See [Plugins](../plugins) for details. |
+| `nd_builtin_cache` | `boolean` | No (default: `false`) | Enable the non-deterministic builtins caching system during policy evaluation, and include the contents of the cache in decision logs. Note that decision logs that are larger than `upload_size_limit_bytes` will drop the `nd_builtin_cache` key from the log entry before uploading. |
 
 ### Keys
 
@@ -831,7 +830,8 @@ included in the actual bundle gzipped tarball.
 | `decision_logs.reporting.min_delay_seconds` | `int64` | No (default: `300`) | Minimum amount of time to wait between uploads. |
 | `decision_logs.reporting.max_delay_seconds` | `int64` | No (default: `600`) | Maximum amount of time to wait between uploads. |
 | `decision_logs.reporting.trigger` | `string` | No (default: `periodic`) | Controls how decision logs are reported to the remote server. Allowed values are `periodic` and `manual`. |
-| `decision_logs.mask_decision` | `string` | No (default: `system/log/mask`) | Set path of masking decision. |
+| `decision_logs.mask_decision` | `string` | No (default: `/system/log/mask`) | Set path of masking decision. |
+| `decision_logs.drop_decision` | `string` | No (default: `/system/log/drop`) | Set path of drop decision. |
 | `decision_logs.plugin` | `string` | No | Use the named plugin for decision logging. If this field exists, the other configuration fields are not required. |
 | `decision_logs.console` | `boolean` | No (default: `false`) | Log the decisions locally to the console. When enabled alongside a remote decision logging API the `service` must be configured, the default `service` selection will be disabled. |
 

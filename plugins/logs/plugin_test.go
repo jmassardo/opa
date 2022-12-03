@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,9 @@ import (
 	"github.com/open-policy-agent/opa/rego"
 	"github.com/open-policy-agent/opa/server"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/print"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/version"
@@ -911,6 +913,57 @@ func TestPluginRateLimitDropCountStatus(t *testing.T) {
 	}
 }
 
+func TestChunkMaxUploadSizeLimitNDBCacheDropping(t *testing.T) {
+	ctx := context.Background()
+	testLogger := test.New()
+
+	ts, err := time.Parse(time.RFC3339Nano, "2018-01-01T12:00:00.123456Z")
+	if err != nil {
+		panic(err)
+	}
+
+	fixture := newTestFixture(t, testFixtureOptions{
+		ConsoleLogger:                  testLogger,
+		ReportingMaxDecisionsPerSecond: float64(1), // 1 decision per second
+		ReportingUploadSizeLimitBytes:  400,
+	})
+	defer fixture.server.stop()
+
+	fixture.plugin.metrics = metrics.New()
+
+	var input interface{} = map[string]interface{}{"method": "GET"}
+	var result interface{} = false
+
+	// Purposely oversized NDBCache entry will force dropping during Log().
+	var ndbCacheExample interface{} = ast.MustJSON(builtins.NDBCache{
+		"test.custom_space_waster": ast.NewObject([2]*ast.Term{
+			ast.ArrayTerm(),
+			ast.StringTerm(strings.Repeat("Wasted space... ", 200)),
+		}),
+	}.AsValue())
+
+	event := &server.Info{
+		DecisionID:     "abc",
+		Path:           "foo/bar",
+		Input:          &input,
+		Results:        &result,
+		RemoteAddr:     "test",
+		Timestamp:      ts,
+		NDBuiltinCache: &ndbCacheExample,
+	}
+
+	beforeNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
+	err = fixture.plugin.Log(ctx, event) // event should be written into the encoder
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterNDBDropCount := fixture.plugin.metrics.Counter(logNDBDropCounterName).Value().(uint64)
+
+	if afterNDBDropCount != beforeNDBDropCount+1 {
+		t.Fatalf("Expected %v NDBCache drop events, saw %v events instead.", beforeNDBDropCount+1, afterNDBDropCount)
+	}
+}
+
 func TestPluginRateLimitBadConfig(t *testing.T) {
 	manager, _ := plugins.New(nil, "test-instance-id", inmem.New())
 
@@ -1335,16 +1388,18 @@ func (a appendingPrintHook) Print(_ print.Context, s string) error {
 
 func TestPluginMasking(t *testing.T) {
 	tests := []struct {
-		note        string
-		rawPolicy   []byte
-		expErased   []string
-		expMasked   []string
-		expPrinted  []string
-		errManager  error
-		expErr      error
-		input       interface{}
-		expected    interface{}
-		reconfigure bool
+		note          string
+		rawPolicy     []byte
+		expErased     []string
+		expMasked     []string
+		expPrinted    []string
+		errManager    error
+		expErr        error
+		input         interface{}
+		expected      interface{}
+		ndbcache      interface{}
+		ndbc_expected interface{}
+		reconfigure   bool
 	}{
 		{
 			note: "simple erase (with body true)",
@@ -1561,6 +1616,59 @@ func TestPluginMasking(t *testing.T) {
 			},
 			expPrinted: []string{"Erasing /input/password"},
 		},
+		{
+			note: "simple upsert on nd_builtin_cache",
+			rawPolicy: []byte(`
+				package system.log
+				mask[{"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x}] {
+					input.nd_builtin_cache["rand.intn"]
+					x := "**REDACTED**"
+				}`),
+			expMasked: []string{"/nd_builtin_cache/rand.intn"},
+			ndbcache: map[string]interface{}{
+				// Simulate rand.intn("z", 15) call, with output of 7.
+				"rand.intn": map[string]interface{}{"[\"z\",15]": json.Number("7")},
+			},
+			ndbc_expected: map[string]interface{}{
+				"rand.intn": "**REDACTED**",
+			},
+		},
+		{
+			note: "simple upsert on nd_builtin_cache with multiple entries",
+			rawPolicy: []byte(`
+				package system.log
+				mask[{"op": "upsert", "path": "/nd_builtin_cache/rand.intn", "value": x}] {
+					input.nd_builtin_cache["rand.intn"]
+					x := "**REDACTED**"
+				}
+
+				mask[{"op": "upsert", "path": "/nd_builtin_cache/net.lookup_ip_addr", "value": y}] {
+					obj := input.nd_builtin_cache["net.lookup_ip_addr"]
+					y := object.union({k: "4.4.x.x" | obj[k]; startswith(k, "[\"4.4.")},
+					                  {k: obj[k] | obj[k]; not startswith(k, "[\"4.4.")})
+				}
+				`),
+			expMasked: []string{"/nd_builtin_cache/net.lookup_ip_addr", "/nd_builtin_cache/rand.intn"},
+			ndbcache: map[string]interface{}{
+				// Simulate rand.intn("z", 15) call, with output of 7.
+				"rand.intn": map[string]interface{}{"[\"z\",15]": json.Number("7")},
+				"net.lookup_ip_addr": map[string]interface{}{
+					"[\"1.1.1.1\"]": "1.1.1.1",
+					"[\"2.2.2.2\"]": "2.2.2.2",
+					"[\"3.3.3.3\"]": "3.3.3.3",
+					"[\"4.4.4.4\"]": "4.4.4.4",
+				},
+			},
+			ndbc_expected: map[string]interface{}{
+				"rand.intn": "**REDACTED**",
+				"net.lookup_ip_addr": map[string]interface{}{
+					"[\"1.1.1.1\"]": "1.1.1.1",
+					"[\"2.2.2.2\"]": "2.2.2.2",
+					"[\"3.3.3.3\"]": "3.3.3.3",
+					"[\"4.4.4.4\"]": "4.4.x.x",
+				},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1612,7 +1720,8 @@ func TestPluginMasking(t *testing.T) {
 			}
 
 			event := &EventV1{
-				Input: &tc.input,
+				Input:          &tc.input,
+				NDBuiltinCache: &tc.ndbcache,
 			}
 
 			if err := plugin.maskEvent(ctx, nil, event); err != nil {
@@ -1621,6 +1730,10 @@ func TestPluginMasking(t *testing.T) {
 
 			if !reflect.DeepEqual(tc.expected, *event.Input) {
 				t.Fatalf("Expected %#+v but got %#+v:", tc.expected, *event.Input)
+			}
+
+			if !reflect.DeepEqual(tc.ndbc_expected, *event.NDBuiltinCache) {
+				t.Fatalf("Expected %#+v but got %#+v:", tc.ndbc_expected, *event.NDBuiltinCache)
 			}
 
 			if len(tc.expErased) > 0 {
@@ -1664,6 +1777,95 @@ func TestPluginMasking(t *testing.T) {
 
 			}
 
+		})
+	}
+}
+
+func TestPluginDrop(t *testing.T) {
+	// Test cases
+	tests := []struct {
+		note      string
+		rawPolicy []byte
+		event     *EventV1
+		expected  bool
+	}{
+		{
+			note: "simple drop",
+			rawPolicy: []byte(`
+			package system.log
+			drop {
+				endswith(input.path, "bar")
+			}`),
+			event: &EventV1{Path: "foo/bar"},
+
+			expected: true,
+		},
+		{
+			note: "no drop",
+			rawPolicy: []byte(`
+			package system.log
+			drop {
+				endswith(input.path, "bar")
+			}`),
+			event:    &EventV1{Path: "foo/foo"},
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			// Setup fixture. Populate store with simple drop policy.
+			ctx := context.Background()
+			store := inmem.New()
+
+			//checks if raw policy is valid and stores policy in store
+			err := storage.Txn(ctx, store, storage.WriteParams, func(txn storage.Transaction) error {
+				if err := store.UpsertPolicy(ctx, txn, "test.rego", tc.rawPolicy); err != nil {
+					return err
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var output []string
+
+			// Create and start manager. Start is required so that stored policies
+			// get compiled and made available to the plugin.
+			manager, err := plugins.New(
+				nil,
+				"test",
+				store,
+				plugins.EnablePrintStatements(true),
+				plugins.PrintHook(appendingPrintHook{printed: &output}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			// Instantiate the plugin.
+			cfg := &Config{Service: "svc"}
+			trigger := plugins.DefaultTriggerMode
+			cfg.validateAndInjectDefaults([]string{"svc"}, nil, &trigger)
+
+			plugin := New(cfg, manager)
+
+			if err := plugin.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			drop, err := plugin.dropEvent(ctx, nil, tc.event)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.expected != drop {
+				t.Errorf("Plugin: Expected drop to be %v got %v", tc.expected, drop)
+			}
 		})
 	}
 }
@@ -1920,6 +2122,13 @@ func TestEventV1ToAST(t *testing.T) {
 		t.Fatalf("Unexpected error: %s", err)
 	}
 
+	var ndbCacheExample interface{} = ast.MustJSON(builtins.NDBCache{
+		"time.now_ns": ast.NewObject([2]*ast.Term{
+			ast.ArrayTerm(),
+			ast.NumberTerm("1663803565571081429"),
+		}),
+	}.AsValue())
+
 	cases := []struct {
 		note  string
 		event EventV1
@@ -2037,6 +2246,44 @@ func TestEventV1ToAST(t *testing.T) {
 		{
 			note:  "big event",
 			event: bigEvent,
+		},
+		{
+			note: "event with nd_builtin_cache",
+			event: EventV1{
+				Labels:     map[string]string{"foo": "1", "bar": "2"},
+				DecisionID: "1234567890",
+				Bundles: map[string]BundleInfoV1{
+					"b1": {"revision7"},
+					"b2": {"0"},
+					"b3": {},
+				},
+				Input:          &goInput,
+				Path:           "/http/authz/allow",
+				RequestedBy:    "[::1]:59943",
+				Result:         &result,
+				Timestamp:      time.Now(),
+				inputAST:       astInput,
+				NDBuiltinCache: &ndbCacheExample,
+			},
+		},
+		{
+			note: "event with req id",
+			event: EventV1{
+				Labels:     map[string]string{"foo": "1", "bar": "2"},
+				DecisionID: "1234567890",
+				Bundles: map[string]BundleInfoV1{
+					"b1": {"revision7"},
+					"b2": {"0"},
+					"b3": {},
+				},
+				Input:       &goInput,
+				Path:        "/http/authz/allow",
+				RequestedBy: "[::1]:59943",
+				Result:      &result,
+				Timestamp:   time.Now(),
+				RequestID:   1,
+				inputAST:    astInput,
+			},
 		},
 	}
 

@@ -5,11 +5,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/ast/location"
+	"github.com/open-policy-agent/opa/bundle"
 	"github.com/open-policy-agent/opa/compile"
 	"github.com/open-policy-agent/opa/cover"
 	fileurl "github.com/open-policy-agent/opa/internal/file/url"
@@ -65,6 +66,9 @@ type evalCommandParams struct {
 	schema              *schemaFlags
 	target              *util.EnumFlag
 	timeout             time.Duration
+	optimizationLevel   int
+	entrypoints         repeatedStringFlag
+	strict              bool
 }
 
 func newEvalCommandParams() evalCommandParams {
@@ -78,7 +82,7 @@ func newEvalCommandParams() evalCommandParams {
 			evalSourceOutput,
 			evalRawOutput,
 		}),
-		explain:         newExplainFlag([]string{explainModeOff, explainModeFull, explainModeNotes, explainModeFails}),
+		explain:         newExplainFlag([]string{explainModeOff, explainModeFull, explainModeNotes, explainModeFails, explainModeDebug}),
 		target:          util.NewEnumFlag(compile.TargetRego, []string{compile.TargetRego, compile.TargetWasm}),
 		count:           1,
 		profileCriteria: newrepeatedStringFlag([]string{}),
@@ -111,6 +115,13 @@ func validateEvalParams(p *evalCommandParams, cmdArgs []string) error {
 	} else if !p.partial && of == evalSourceOutput {
 		return errors.New("invalid output format for evaluation")
 	}
+
+	if p.optimizationLevel > 0 {
+		if len(p.dataPaths.v) > 0 && p.bundlePaths.isFlagSet() {
+			return fmt.Errorf("specify either --data or --bundle flag with optimization level greater than 0")
+		}
+	}
+
 	if p.profileLimit.isFlagSet() || p.profileCriteria.isFlagSet() {
 		p.profile = true
 	}
@@ -157,11 +168,11 @@ Examples
 
 To evaluate a simple query:
 
-    $ opa eval 'x = 1; y = 2; x < y'
+    $ opa eval 'x := 1; y := 2; x < y'
 
 To evaluate a query against JSON data:
 
-    $ opa eval --data data.json 'data.names[_] = name'
+    $ opa eval --data data.json 'name := data.names[_]'
 
 To evaluate a query against JSON data supplied with a file:// URL:
 
@@ -200,6 +211,14 @@ on bundle directory structures.
 
 The --data flag can be used to recursively load ALL *.rego, *.json, and
 *.yaml files under the specified directory.
+
+The -O flag controls the optimization level. By default, optimization is disabled (-O=0).
+When optimization is enabled the 'eval' command generates a bundle from the files provided
+with either the --bundle or --data flag. This bundle is semantically equivalent to the input
+files however the structure of the files in the bundle may have been changed by rewriting, inlining,
+pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is
+enabled at least one entrypoint must be supplied, either via the -e option, or via entrypoint
+metadata annotations.
 
 Output Formats
 --------------
@@ -279,6 +298,9 @@ access.
 	evalCommand.Flags().BoolVarP(&params.failDefined, "fail-defined", "", false, "exits with non-zero exit code on defined/non-empty result and errors")
 	evalCommand.Flags().DurationVar(&params.timeout, "timeout", 0, "set eval timeout (default unlimited)")
 
+	evalCommand.Flags().IntVarP(&params.optimizationLevel, "optimize", "O", 0, "set optimization level")
+	evalCommand.Flags().VarP(&params.entrypoints, "entrypoint", "e", "set slash separated entrypoint path")
+
 	// Shared flags
 	addCapabilitiesFlag(evalCommand.Flags(), params.capabilities)
 	addPartialFlag(evalCommand.Flags(), &params.partial, false)
@@ -298,6 +320,7 @@ access.
 	addSchemaFlags(evalCommand.Flags(), params.schema)
 	addTargetFlag(evalCommand.Flags(), params.target)
 	addCountFlag(evalCommand.Flags(), &params.count, "benchmark")
+	addStrictFlag(evalCommand.Flags(), &params.strict, false)
 
 	RootCommand.AddCommand(evalCommand)
 }
@@ -416,8 +439,10 @@ func evalOnce(ctx context.Context, ectx *evalContext) pr.Output {
 
 	if ectx.params.explain != nil {
 		switch ectx.params.explain.String() {
+		case explainModeDebug:
+			result.Explanation = lineage.Debug(*(ectx.tracer))
 		case explainModeFull:
-			result.Explanation = *(ectx.tracer)
+			result.Explanation = lineage.Full(*(ectx.tracer))
 		case explainModeNotes:
 			result.Explanation = lineage.Notes(*(ectx.tracer))
 		case explainModeFails:
@@ -461,7 +486,7 @@ func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 	var query string
 
 	if params.stdin {
-		bs, err := ioutil.ReadAll(os.Stdin)
+		bs, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -493,12 +518,31 @@ func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 		f := loaderFilter{
 			Ignore: params.ignore,
 		}
-		regoArgs = append(regoArgs, rego.Load(params.dataPaths.v, f.Apply))
+
+		if params.optimizationLevel <= 0 {
+			regoArgs = append(regoArgs, rego.Load(params.dataPaths.v, f.Apply))
+		} else {
+			b, err := generateOptimizedBundle(params, false, f.Apply, params.dataPaths.v)
+			if err != nil {
+				return nil, err
+			}
+
+			regoArgs = append(regoArgs, rego.ParsedBundle("optimized", b))
+		}
 	}
 
 	if params.bundlePaths.isFlagSet() {
-		for _, bundleDir := range params.bundlePaths.v {
-			regoArgs = append(regoArgs, rego.LoadBundle(bundleDir))
+		if params.optimizationLevel <= 0 {
+			for _, bundleDir := range params.bundlePaths.v {
+				regoArgs = append(regoArgs, rego.LoadBundle(bundleDir))
+			}
+		} else {
+			b, err := generateOptimizedBundle(params, true, buildCommandLoaderFilter(true, params.ignore), params.bundlePaths.v)
+			if err != nil {
+				return nil, err
+			}
+
+			regoArgs = append(regoArgs, rego.ParsedBundle("optimized", b))
 		}
 	}
 
@@ -584,6 +628,10 @@ func setupEval(args []string, params evalCommandParams) (*evalContext, error) {
 		regoArgs = append(regoArgs, rego.Capabilities(params.capabilities.C))
 	}
 
+	if params.strict {
+		regoArgs = append(regoArgs, rego.Strict(params.strict))
+	}
+
 	evalCtx := &evalContext{
 		params:   params,
 		metrics:  m,
@@ -628,13 +676,13 @@ func getProfileSortOrder(sortOrder []string) []string {
 
 func readInputBytes(params evalCommandParams) ([]byte, error) {
 	if params.stdinInput {
-		return ioutil.ReadAll(os.Stdin)
+		return io.ReadAll(os.Stdin)
 	} else if params.inputPath != "" {
 		path, err := fileurl.Clean(params.inputPath)
 		if err != nil {
 			return nil, err
 		}
-		return ioutil.ReadFile(path)
+		return os.ReadFile(path)
 	}
 	return nil, nil
 }
@@ -739,4 +787,33 @@ func (vis *astLocationResetVisitor) visit(x interface{}) bool {
 		vis.n++
 	}
 	return false
+}
+
+func generateOptimizedBundle(params evalCommandParams, asBundle bool, filter loader.Filter, paths []string) (*bundle.Bundle, error) {
+	buf := bytes.NewBuffer(nil)
+
+	var capabilities *ast.Capabilities
+	if params.capabilities.C != nil {
+		capabilities = params.capabilities.C
+	} else {
+		capabilities = ast.CapabilitiesForThisVersion()
+	}
+
+	compiler := compile.New().
+		WithCapabilities(capabilities).
+		WithTarget(params.target.String()).
+		WithAsBundle(asBundle).
+		WithOptimizationLevel(params.optimizationLevel).
+		WithOutput(buf).
+		WithEntrypoints(params.entrypoints.v...).
+		WithRegoAnnotationEntrypoints(true).
+		WithPaths(paths...).
+		WithFilter(filter)
+
+	err := compiler.Build(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return compiler.Bundle(), nil
 }

@@ -51,6 +51,25 @@ func BenchmarkObjectCreationAndLookup(b *testing.B) {
 	}
 }
 
+func BenchmarkSetCreationAndLookup(b *testing.B) {
+	sizes := []int{5, 50, 500, 5000, 50000, 500000}
+	for _, n := range sizes {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			set := NewSet()
+			for i := 0; i < n; i++ {
+				set.Add(StringTerm(fmt.Sprint(i)))
+			}
+			key := StringTerm(fmt.Sprint(n - 1))
+			for i := 0; i < b.N; i++ {
+				present := set.Contains(key)
+				if !present {
+					b.Fatal("expected hit")
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkSetIntersection(b *testing.B) {
 	sizes := []int{5, 50, 500, 5000}
 	for _, n := range sizes {
@@ -133,9 +152,12 @@ var bs []byte
 
 // BenchmarkObjectString generates several objects of different sizes, and
 // marshals them to JSON via two ways:
-//   map[string]int -> ast.Value -> .String()
+//
+//	map[string]int -> ast.Value -> .String()
+//
 // and
-//   map[string]int -> json.Marshal()
+//
+//	map[string]int -> json.Marshal()
 //
 // The difference between these two is relevant for feeding input into the
 // wasm vm: when calling rego.New(...) with rego.Target("wasm"), it's up to
@@ -288,11 +310,10 @@ func BenchmarkArrayString(b *testing.B) {
 }
 
 func BenchmarkSetString(b *testing.B) {
-	sizes := []int{5, 50, 500, 5000}
+	sizes := []int{5, 50, 500, 5000, 50000}
 
 	for _, n := range sizes {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
-
 			val := NewSet()
 			for i := 0; i < n; i++ {
 				val.Add(IntNumberTerm(i))
@@ -306,4 +327,29 @@ func BenchmarkSetString(b *testing.B) {
 			})
 		})
 	}
+}
+
+func BenchmarkSetMarshalJSON(b *testing.B) {
+	var err error
+	sizes := []int{5, 50, 500, 5000, 50000}
+
+	for _, n := range sizes {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			set := NewSet()
+			for i := 0; i < n; i++ {
+				set.Add(StringTerm(fmt.Sprint(i)))
+			}
+
+			b.Run("json.Marshal", func(b *testing.B) {
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					bs, err = json.Marshal(set)
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		})
+	}
+
 }

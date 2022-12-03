@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,7 +21,7 @@ import (
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/internal/presentation"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/util"
 )
 
@@ -287,7 +286,11 @@ func TestDumpPath(t *testing.T) {
 	var buffer bytes.Buffer
 	repl := newRepl(store, &buffer)
 
-	dir, err := ioutil.TempDir("", "dump-path-test")
+	// NOTE: We are converting the path to lowercase in repl.OneShot.
+	// In file systems that are case-sensitive, this test will fail if we use
+	// a CamelCase directory name.
+	// See: https://github.com/open-policy-agent/opa/pull/5227#issuecomment-1273975492
+	dir, err := os.MkdirTemp("", "dump-path-test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +310,7 @@ func TestDumpPath(t *testing.T) {
 		t.Errorf("Expected no output but got: %v", buffer.String())
 	}
 
-	bs, err := ioutil.ReadFile(file)
+	bs, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatalf("Expected file read to succeed but got: %v", err)
 	}
@@ -2695,6 +2698,24 @@ func TestCapabilities(t *testing.T) {
 		}
 	} else {
 		t.Fatalf("Expected error on http.send")
+	}
+}
+
+func TestTraceArgument(t *testing.T) {
+	ctx := context.Background()
+	store := inmem.New()
+	var buffer bytes.Buffer
+	repl := newRepl(store, &buffer)
+	if err := repl.OneShot(ctx, "trace debug"); err != nil {
+		t.Fatal(err)
+	}
+	if err := repl.OneShot(ctx, "show debug"); err != nil {
+		t.Fatal(err)
+	}
+	output := buffer.String()
+	expected := `"explain": "debug"`
+	if !strings.Contains(output, expected) {
+		t.Fatalf("Expected output to contain %s but got %s", expected, output)
 	}
 }
 

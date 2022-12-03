@@ -695,6 +695,19 @@ document that is defined by the rule.
 
 The sample code in this section make use of the data defined in [Examples](#example-data).
 
+{{< info >}}
+Rule definitions can be more expressive when using the _future keywords_ `contains` and
+`if`. They are optional, and you will find examples below of defining rules without them.
+
+To follow along as-is, please import the keywords:
+```live:eg/data/info:module:read_only
+import future.keywords.if
+import future.keywords.contains
+```
+
+[See the docs on _future keywords_](#future-keywords) for more information.
+{{< /info >}}
+
 ### Generating Sets
 
 The following rule defines a set containing the hostnames of all servers:
@@ -704,7 +717,15 @@ hostnames contains name if {
     name := sites[_].servers[_].hostname
 }
 ```
-Note that the (future) keyword `if` is optional here.
+
+Note that the [(future) keywords `contains` and `if`](#future-keywords) are optional here.
+If future keywords are not available to you, you can define the same rule as follows:
+
+```live:eg/data/rules2:module:read_only
+hostnames[name] {
+    name := sites[_].servers[_].hostname
+}
+```
 
 When we query for the content of `hostnames` we see the same data as we would if we queried using the `sites[_].servers[_].hostname` reference directly:
 
@@ -752,6 +773,19 @@ apps_by_hostname["helium"]
 ```live:eg/data/rule_objects:output
 ```
 
+Using the [(future) keyword `if`](#future-keywords) is optional here.
+The same rule can be defined as follows:
+
+```live:eg/data/rule_objects2:module
+apps_by_hostname[hostname] := app {
+    some i
+    server := sites[_].servers[_]
+    hostname := server.hostname
+    apps[i].servers[_] == server.name
+    app := apps[i].name
+}
+```
+
 ### Incremental Definitions
 
 A rule may be defined multiple times with the same name. When a rule is defined
@@ -797,6 +831,21 @@ instances[x]
 ```live:eg/data/incremental_rule:output
 ```
 
+Note that the [(future) keywords `contains` and `if`](#future-keywords) are optional here.
+If future keywords are not available to you, you can define the same rule as follows:
+
+```live:eg/data/incremental_rule2:module
+instances[instance] {
+    server := sites[_].servers[_]
+    instance := {"address": server.hostname, "name": server.name}
+}
+
+instances[instance] {
+    container := containers[_]
+    instance := {"address": container.ipaddress, "name": container.name}
+}
+```
+
 ### Complete Definitions
 
 In addition to rules that *partially* define sets and objects, Rego also
@@ -808,8 +857,9 @@ commonly used for constants:
 pi := 3.14159
 ```
 
-> Rego allows authors to omit the body of rules. If the body is omitted, it
-> defaults to true.
+{{< info >}}
+Rego allows authors to omit the body of rules. If the body is omitted, it defaults to true.
+{{< /info >}}
 
 Documents produced by rules with complete definitions can only have one value at
 a time. If evaluation produces multiple values for the same document, an error
@@ -838,7 +888,8 @@ Error:
 ```live:eg/conflicting_rules:output:expect_conflict
 ```
 
-OPA returns an error in this case because the rule definitions are in *conflict*. The value produced by max_memory cannot be 32 and 4 **at the same time**.
+OPA returns an error in this case because the rule definitions are in *conflict*.
+The value produced by max_memory cannot be 32 and 4 **at the same time**.
 
 The documents produced by rules with complete definitions may still be undefined:
 
@@ -849,6 +900,32 @@ max_memory with user as "johnson"
 ```
 
 In some cases, having an undefined result for a document is not desirable. In those cases, policies can use the [Default Keyword](#default-keyword) to provide a fallback value.
+
+Note that the [(future) keyword `if`](#future-keywords) is optional here.
+If future keywords are not available to you, you can define complete rules like this:
+
+```live:eg/conflicting_rules2:module
+max_memory := 32 { power_users[user] }
+max_memory := 4 { restricted_users[user] }
+```
+
+### Rule Heads containing References
+
+As a shorthand for defining nested rule structures, it's valid to use references as rule heads:
+
+```live:eg/ref_heads:module
+fruit.apple.seeds = 12
+
+fruit.orange.color = "orange"
+```
+
+This module defines _two complete rules_, `data.example.fruit.apple.seeds` and `data.example.fruit.orange.color`:
+
+```live:eg/ref_heads:query:merge_down
+data.example
+```
+```live:eg/ref_heads:output
+```
 
 ### Functions
 
@@ -866,6 +943,16 @@ trim_and_split(s) := x if {
 trim_and_split("   foo.bar ")
 ```
 ```live:eg/basic_function:output
+```
+
+Note that the [(future) keyword `if`](#future-keywords) is optional here.
+If future keywords are not available to you, you can define the same function as follows:
+
+```live:eg/basic_function2:module:read_only
+trim_and_split(s) := x {
+     t := trim(s, " ")
+     x := split(t, ".")
+}
 ```
 
 Functions may have an arbitrary number of inputs, but exactly one output. Function arguments may be any kind of term. For example, suppose we have the following function:
@@ -973,6 +1060,65 @@ s(5, 2)
 s(5, 3)
 ```
 ```live:eg/double_function_define_undefined/2:output:expect_undefined
+```
+
+#### Function overloading
+Rego does not currently support the overloading of functions by the number of parameters. If two function definitions are given with the same function name but different numbers of parameters, a compile-time type error is generated.
+
+```live:eg/function_overloading_error:module
+r(x) := result if {
+    result := 2*x
+}
+
+r(x, y) := result if {
+    result := 2*x + 3*y
+}
+```
+
+```live:eg/function_overloading_error:output:expect_rego_type_error
+```
+
+The error can be avoided by using different function names.
+```live:eg/function_overloading_naming:module
+r_1(x) := result if {
+    result := 2*x
+}
+
+r_2(x, y) := result if {
+    result := 2*x + 3*y
+}
+```
+
+```live:eg/function_overloading_naming:query:merge_down
+[
+  r_1(10),
+  r_2(10, 1)
+]
+```
+```live:eg/function_overloading_naming:output
+```
+
+In the unusual case that it is critical to use the same name, the function could be made to take the list of parameters as a single array. However, this approach is not generally recommended because it sacrifices some helpful compile-time checking and can be quite error-prone.
+
+```live:eg/function_overloading_array:module
+r(params) := result if {
+    count(params) == 1
+    result := 2*params[0]
+}
+
+r(params) := result if {
+    count(params) == 2
+    result := 2*params[0] + 3*params[1]
+}
+```
+
+```live:eg/function_overloading_array:query:merge_down
+[
+  r([10]),
+  r([10, 1])
+]
+```
+```live:eg/function_overloading_array:output
 ```
 
 ## Negation
@@ -1286,7 +1432,7 @@ To ensure backwards-compatibility, new keywords (like `every`) are introduced sl
 In the first stage, users can opt-in to using the new keywords via a special import:
 
 - `import future.keywords` introduces _all_ future keywords, and
-- `import future.keyword.x` _only_ introduces the `x` keyword -- see below for all known future keywords.
+- `import future.keywords.x` _only_ introduces the `x` keyword -- see below for all known future keywords.
 
 {{< danger >}}
 Using `import future.keywords` to import all future keywords means an **opt-out of a
@@ -1448,7 +1594,7 @@ names_with_dev
 The `every` keyword takes an (optional) key argument, a value argument, a domain, and a
 block of further queries, its "body".
 
-The keyword is used to explicity assert that its body is true for *any element in the domain*.
+The keyword is used to explicitly assert that its body is true for *any element in the domain*.
 It will iterate over the domain, bind its variables, and check that the body holds
 for those bindings.
 If one of the bindings does not yield a successful evaluation of the body, the overall
@@ -1598,7 +1744,8 @@ When `<target>` is a reference to a function, like `http.send`, then
 its `<value>` can be any of the following:
 1. a value: `with http.send as {"body": {"success": true }}`
 2. a reference to another function: `with http.send as mock_http_send`
-3. a reference to another (possibly custom) built-in function: `with custom_builtin as less_strict_custom_builtin`.
+3. a reference to another (possibly custom) built-in function: `with custom_builtin as less_strict_custom_builtin`
+4. a reference to a rule that will be used as the _value_.
 
 When the replacement value is a function, its arity needs to match the replaced
 function's arity; and the types must be compatible.
@@ -1723,7 +1870,7 @@ order-sensitive system like IPTables.
 ```live:eg/else:module
 authorize := "allow" if {
     input.user == "superuser"           # allow 'superuser' to perform any operation.
-} else := "deny" {
+} else := "deny" if {
     input.path[0] == "admin"            # disallow 'admin' operations...
     input.source_network == "external"  # from external networks.
 } # ... more rules

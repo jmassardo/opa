@@ -14,13 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go"
+	wasmtime "github.com/bytecodealliance/wasmtime-go/v3"
 
 	"github.com/open-policy-agent/opa/ast"
 	sdk_errors "github.com/open-policy-agent/opa/internal/wasm/sdk/opa/errors"
 	"github.com/open-policy-agent/opa/internal/wasm/util"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/topdown/print"
 )
@@ -271,10 +272,11 @@ func (i *VM) Eval(ctx context.Context,
 	seed io.Reader,
 	ns time.Time,
 	iqbCache cache.InterQueryCache,
+	ndbCache builtins.NDBCache,
 	ph print.Hook,
 	capabilities *ast.Capabilities) ([]byte, error) {
 	if i.abiMinorVersion < int32(2) {
-		return i.evalCompat(ctx, entrypoint, input, metrics, seed, ns, iqbCache, ph, capabilities)
+		return i.evalCompat(ctx, entrypoint, input, metrics, seed, ns, iqbCache, ndbCache, ph, capabilities)
 	}
 
 	metrics.Timer("wasm_vm_eval").Start()
@@ -325,10 +327,10 @@ func (i *VM) Eval(ctx context.Context,
 	// make use of it (e.g. `http.send`); and it will spawn a go routine
 	// cancelling the builtins that use topdown.Cancel, when the context is
 	// cancelled.
-	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ph, capabilities)
+	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ndbCache, ph, capabilities)
 
 	metrics.Timer("wasm_vm_eval_call").Start()
-	resultAddr, err := i.evalOneOff(ctx, int32(entrypoint), i.dataAddr, inputAddr, inputLen, heapPtr)
+	resultAddr, err := i.evalOneOff(ctx, entrypoint, i.dataAddr, inputAddr, inputLen, heapPtr)
 	if err != nil {
 		return nil, err
 	}
@@ -354,6 +356,7 @@ func (i *VM) evalCompat(ctx context.Context,
 	seed io.Reader,
 	ns time.Time,
 	iqbCache cache.InterQueryCache,
+	ndbCache builtins.NDBCache,
 	ph print.Hook,
 	capabilities *ast.Capabilities) ([]byte, error) {
 	metrics.Timer("wasm_vm_eval").Start()
@@ -365,7 +368,7 @@ func (i *VM) evalCompat(ctx context.Context,
 	// make use of it (e.g. `http.send`); and it will spawn a go routine
 	// cancelling the builtins that use topdown.Cancel, when the context is
 	// cancelled.
-	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ph, capabilities)
+	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ndbCache, ph, capabilities)
 
 	err := i.setHeapState(ctx, i.evalHeapPtr)
 	if err != nil {
@@ -384,7 +387,7 @@ func (i *VM) evalCompat(ctx context.Context,
 		}
 	}
 
-	if err := i.evalCtxSetEntrypoint(ctx, ctxAddr, int32(entrypoint)); err != nil {
+	if err := i.evalCtxSetEntrypoint(ctx, ctxAddr, entrypoint); err != nil {
 		return nil, err
 	}
 
@@ -467,7 +470,7 @@ func (i *VM) SetPolicyData(ctx context.Context, opts vmOpts) error {
 		copy(mem[i.baseHeapPtr:i.baseHeapPtr+len], opts.parsedData)
 		i.dataAddr = opts.parsedDataAddr
 
-		i.evalHeapPtr = i.baseHeapPtr + int32(len)
+		i.evalHeapPtr = i.baseHeapPtr + len
 		err := i.setHeapState(ctx, i.evalHeapPtr)
 		if err != nil {
 			return err
@@ -743,7 +746,7 @@ func callOrCancel(ctx context.Context, vm *VM, name string, args ...int32) (inte
 		// if last err was trap, extract information
 		var t *wasmtime.Trap
 		if errors.As(err, &t) {
-			if t.Message() == "epoch deadline reached during execution" {
+			if strings.Contains(t.Message(), "wasm trap: interrupt") {
 				return 0, sdk_errors.New(sdk_errors.CancelledErr, "interrupted")
 			}
 			return 0, sdk_errors.New(sdk_errors.InternalErr, getStack(t.Frames(), "trapped"))

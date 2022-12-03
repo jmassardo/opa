@@ -177,7 +177,7 @@ func populateNamespaces(out io.Writer, n map[string][]string) error {
 	t.SetAutoMergeCellsByColumnIndex([]int{0})
 	var lines [][]string
 
-	var keys []string
+	keys := make([]string, 0, len(n))
 	for k := range n {
 		keys = append(keys, k)
 	}
@@ -217,6 +217,9 @@ func populateAnnotations(out io.Writer, refs []*ast.AnnotationsRef) error {
 				fmt.Fprintln(out, "Rule:    ", r.Head.Name)
 			}
 			fmt.Fprintln(out, "Location:", ref.Location.String())
+			if a := ref.Annotations; a != nil && a.Entrypoint {
+				fmt.Fprintln(out, "Entrypoint:", a.Entrypoint)
+			}
 			fmt.Fprintln(out)
 
 			if a := ref.Annotations; a != nil {
@@ -334,7 +337,7 @@ func printTitle(out io.Writer, ref *ast.AnnotationsRef) {
 func generateTableWithKeys(writer io.Writer, keys ...string) *tablewriter.Table {
 	table := tablewriter.NewWriter(writer)
 	aligns := []int{}
-	var hdrs []string
+	hdrs := make([]string, 0, len(keys))
 	for _, k := range keys {
 		hdrs = append(hdrs, strings.Title(k)) //nolint:staticcheck // SA1019, no unicode
 		aligns = append(aligns, tablewriter.ALIGN_LEFT)

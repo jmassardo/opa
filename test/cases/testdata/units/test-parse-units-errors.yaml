@@ -8,7 +8,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: no amount provided"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: no amount provided"
   strict_error: true
 - data:
   modules:
@@ -19,7 +20,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: no amount provided"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: no amount provided"
   strict_error: true
 - data:
   modules:
@@ -30,7 +32,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: no amount provided"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: no amount provided"
   strict_error: true
 - data:
   modules:
@@ -41,7 +44,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: could not parse amount to a number"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: could not parse amount to a number"
   strict_error: true
 - data:
   modules:
@@ -52,7 +56,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: could not parse amount to a number"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: could not parse amount to a number"
   strict_error: true
 - data:
   modules:
@@ -63,7 +68,8 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: spaces not allowed in resource strings"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: spaces not allowed in resource strings"
   strict_error: true
 - data:
   modules:
@@ -74,5 +80,6 @@ cases:
     }
   note: units_parse/failure
   query: data.test.p = x
-  want_error: "units.parse error: spaces not allowed in resource strings"
+  want_error_code: eval_builtin_error
+  want_error: "units.parse: spaces not allowed in resource strings"
   strict_error: true

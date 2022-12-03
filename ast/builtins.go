@@ -102,6 +102,7 @@ var DefaultBuiltins = [...]*Builtin{
 	RegexTemplateMatch,
 	RegexFind,
 	RegexFindAllStringSubmatch,
+	RegexReplace,
 
 	// Sets
 	SetDiff,
@@ -109,6 +110,8 @@ var DefaultBuiltins = [...]*Builtin{
 	Union,
 
 	// Strings
+	AnyPrefixMatch,
+	AnySuffixMatch,
 	Concat,
 	FormatInt,
 	IndexOf,
@@ -161,6 +164,7 @@ var DefaultBuiltins = [...]*Builtin{
 	ObjectRemove,
 	ObjectFilter,
 	ObjectGet,
+	ObjectKeys,
 	ObjectSubset,
 
 	// JSON Object Manipulation
@@ -237,6 +241,10 @@ var DefaultBuiltins = [...]*Builtin{
 	GraphQLParseQuery,
 	GraphQLParseSchema,
 	GraphQLIsValid,
+	GraphQLSchemaIsValid,
+
+	// Cloud Provider Helpers
+	ProvidersAWSSignReqObj,
 
 	// Rego
 	RegoParseModule,
@@ -257,6 +265,7 @@ var DefaultBuiltins = [...]*Builtin{
 	NetCIDRExpand,
 	NetCIDRMerge,
 	NetLookupIPAddr,
+	NetCIDRIsValid,
 
 	// Glob
 	GlobMatch,
@@ -269,7 +278,7 @@ var DefaultBuiltins = [...]*Builtin{
 	// UUIDs
 	UUIDRFC4122,
 
-	//SemVers
+	// SemVers
 	SemVerIsValid,
 	SemVerCompare,
 
@@ -282,14 +291,18 @@ var DefaultBuiltins = [...]*Builtin{
 // built-in definitions.
 var BuiltinMap map[string]*Builtin
 
-// IgnoreDuringPartialEval is a set of built-in functions that should not be
-// evaluated during partial evaluation. These functions are not partially
-// evaluated because they are not pure.
+// Deprecated: Builtins can now be directly annotated with the
+// Nondeterministic property, and when set to true, will be ignored
+// for partial evaluation.
 var IgnoreDuringPartialEval = []*Builtin{
+	RandIntn,
+	UUIDRFC4122,
+	JWTDecodeVerify,
+	JWTEncodeSignRaw,
+	JWTEncodeSign,
 	NowNanos,
 	HTTPSend,
-	UUIDRFC4122,
-	RandIntn,
+	OPARuntime,
 	NetLookupIPAddr,
 }
 
@@ -939,8 +952,8 @@ var RegexFind = &Builtin{
 // GlobsMatch takes two strings regexp-style strings and evaluates to true if their
 // intersection matches a non-empty set of non-empty strings.
 // Examples:
-//  - "a.a." and ".b.b" -> true.
-//  - "[a-z]*" and [0-9]+" -> not true.
+//   - "a.a." and ".b.b" -> true.
+//   - "[a-z]*" and [0-9]+" -> not true.
 var GlobsMatch = &Builtin{
 	Name: "regex.globs_match",
 	Description: `Checks if the intersection of two glob-style regular expressions matches a non-empty set of non-empty strings.
@@ -958,6 +971,48 @@ The set of regex symbols is limited for this builtin: only ` + "`.`, `*`, `+`, `
  * Strings
  */
 var stringsCat = category("strings")
+
+var AnyPrefixMatch = &Builtin{
+	Name:        "strings.any_prefix_match",
+	Description: "Returns true if any of the search strings begins with any of the base strings.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("search", types.NewAny(
+				types.S,
+				types.NewSet(types.S),
+				types.NewArray(nil, types.S),
+			)).Description("search string(s)"),
+			types.Named("base", types.NewAny(
+				types.S,
+				types.NewSet(types.S),
+				types.NewArray(nil, types.S),
+			)).Description("base string(s)"),
+		),
+		types.Named("result", types.B).Description("result of the prefix check"),
+	),
+	Categories: stringsCat,
+}
+
+var AnySuffixMatch = &Builtin{
+	Name:        "strings.any_suffix_match",
+	Description: "Returns true if any of the search strings ends with any of the base strings.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("search", types.NewAny(
+				types.S,
+				types.NewSet(types.S),
+				types.NewArray(nil, types.S),
+			)).Description("search string(s)"),
+			types.Named("base", types.NewAny(
+				types.S,
+				types.NewSet(types.S),
+				types.NewArray(nil, types.S),
+			)).Description("base string(s)"),
+		),
+		types.Named("result", types.B).Description("result of the suffix check"),
+	),
+	Categories: stringsCat,
+}
 
 var Concat = &Builtin{
 	Name:        "concat",
@@ -977,7 +1032,7 @@ var Concat = &Builtin{
 
 var FormatInt = &Builtin{
 	Name:        "format_int",
-	Description: "Returns the string representation of the number in the given base after converting it to an integer value.",
+	Description: "Returns the string representation of the number in the given base after rounding it down to an integer value.",
 	Decl: types.NewFunction(
 		types.Args(
 			types.Named("number", types.N).Description("number to format"),
@@ -1137,6 +1192,19 @@ The old string comparisons are done in argument order.`,
 	),
 }
 
+var RegexReplace = &Builtin{
+	Name:        "regex.replace",
+	Description: `Find and replaces the text using the regular expression pattern.`,
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("s", types.S).Description("string being processed"),
+			types.Named("pattern", types.S).Description("regex pattern to be applied"),
+			types.Named("value", types.S).Description("regex value"),
+		),
+		types.Named("output", types.S),
+	),
+}
+
 var Trim = &Builtin{
 	Name:        "trim",
 	Description: "Returns `value` with all leading or trailing instances of the `cutset` characters removed.",
@@ -1244,6 +1312,7 @@ var StringReverse = &Builtin{
  */
 
 // RandIntn returns a random number 0 - n
+// Marked non-deterministic because it relies on RNG internally.
 var RandIntn = &Builtin{
 	Name:        "rand.intn",
 	Description: "Returns a random integer between `0` and `n` (`n` exlusive). If `n` is `0`, then `y` is always `0`. For any given argument pair (`str`, `n`), the output will be consistent throughout a query evaluation.",
@@ -1254,7 +1323,8 @@ var RandIntn = &Builtin{
 		),
 		types.Named("y", types.N).Description("random integer in the range `[0, abs(n))`"),
 	),
-	Categories: number,
+	Categories:       number,
+	Nondeterministic: true,
 }
 
 var NumbersRange = &Builtin{
@@ -1273,7 +1343,6 @@ var NumbersRange = &Builtin{
  * Units
  */
 
-// UnitsParse
 var UnitsParse = &Builtin{
 	Name: "units.parse",
 	Description: `Converts strings like "10G", "5K", "4M", "1500m" and the like into a number.
@@ -1310,6 +1379,7 @@ unit is optional and omitting it wil give the same result (e.g. Mi and MiB).`,
  */
 
 // UUIDRFC4122 returns a version 4 UUID string.
+// Marked non-deterministic because it relies on RNG internally.
 var UUIDRFC4122 = &Builtin{
 	Name:        "uuid.rfc4122",
 	Description: "Returns a new UUIDv4.",
@@ -1319,6 +1389,7 @@ var UUIDRFC4122 = &Builtin{
 		),
 		types.Named("output", types.S).Description("a version 4 UUID; for any given `k`, the output will be consistent throughout a query evaluation"),
 	),
+	Nondeterministic: true,
 }
 
 /**
@@ -1406,7 +1477,9 @@ var JSONRemove = &Builtin{
 var JSONPatch = &Builtin{
 	Name: "json.patch",
 	Description: "Patches an object according to RFC6902. " +
-		"For example: `json.patch({\"a\": {\"foo\": 1}}, [{\"op\": \"add\", \"path\": \"/a/bar\", \"value\": 2}])` results in `{\"a\": {\"foo\": 1, \"bar\": 2}`.  The patches are applied atomically: if any of them fails, the result will be undefined.",
+		"For example: `json.patch({\"a\": {\"foo\": 1}}, [{\"op\": \"add\", \"path\": \"/a/bar\", \"value\": 2}])` results in `{\"a\": {\"foo\": 1, \"bar\": 2}`. " +
+		"The patches are applied atomically: if any of them fails, the result will be undefined. " +
+		"Additionally works on sets, where a value contained in the set is considered to be its path.",
 	Decl: types.NewFunction(
 		types.Args(
 			types.Named("object", types.A), // TODO(sr): types.A?
@@ -1546,6 +1619,18 @@ var ObjectGet = &Builtin{
 			types.Named("default", types.A).Description("default to use when lookup fails"),
 		),
 		types.Named("value", types.A).Description("`object[key]` if present, otherwise `default`"),
+	),
+}
+
+var ObjectKeys = &Builtin{
+	Name: "object.keys",
+	Description: "Returns a set of an object's keys. " +
+		"For example: `object.keys({\"a\": 1, \"b\": true, \"c\": \"d\")` results in `{\"a\", \"b\", \"c\"}`.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("object", types.NewObject(nil, types.NewDynamicProperty(types.A, types.A))).Description("object to get keys from"),
+		),
+		types.Named("value", types.NewSet(types.A)).Description("set of `object`'s keys"),
 	),
 }
 
@@ -1956,6 +2041,7 @@ var JWTVerifyHS512 = &Builtin{
 	Categories: tokensCat,
 }
 
+// Marked non-deterministic because it relies on time internally.
 var JWTDecodeVerify = &Builtin{
 	Name: "io.jwt.decode_verify",
 	Description: `Verifies a JWT signature under parameterized constraints and decodes the claims if it is valid.
@@ -1971,11 +2057,13 @@ Supports the following algorithms: HS256, HS384, HS512, RS256, RS384, RS512, ES2
 			types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)),
 		}, nil)).Description("`[valid, header, payload]`:  if the input token is verified and meets the requirements of `constraints` then `valid` is `true`; `header` and `payload` are objects containing the JOSE header and the JWT claim set; otherwise, `valid` is `false`, `header` and `payload` are `{}`"),
 	),
-	Categories: tokensCat,
+	Categories:       tokensCat,
+	Nondeterministic: true,
 }
 
 var tokenSign = category("tokensign")
 
+// Marked non-deterministic because it relies on RNG internally.
 var JWTEncodeSignRaw = &Builtin{
 	Name:        "io.jwt.encode_sign_raw",
 	Description: "Encodes and optionally signs a JSON Web Token.",
@@ -1987,9 +2075,11 @@ var JWTEncodeSignRaw = &Builtin{
 		),
 		types.Named("output", types.S).Description("signed JWT"),
 	),
-	Categories: tokenSign,
+	Categories:       tokenSign,
+	Nondeterministic: true,
 }
 
+// Marked non-deterministic because it relies on RNG internally.
 var JWTEncodeSign = &Builtin{
 	Name:        "io.jwt.encode_sign",
 	Description: "Encodes and optionally signs a JSON Web Token. Inputs are taken as objects, not encoded strings (see `io.jwt.encode_sign_raw`).",
@@ -2001,13 +2091,15 @@ var JWTEncodeSign = &Builtin{
 		),
 		types.Named("output", types.S).Description("signed JWT"),
 	),
-	Categories: tokenSign,
+	Categories:       tokenSign,
+	Nondeterministic: true,
 }
 
 /**
  * Time
  */
 
+// Marked non-deterministic because it relies on time directly.
 var NowNanos = &Builtin{
 	Name:        "time.now_ns",
 	Description: "Returns the current time since epoch in nanoseconds.",
@@ -2015,6 +2107,7 @@ var NowNanos = &Builtin{
 		nil,
 		types.Named("now", types.N).Description("nanoseconds since epoch"),
 	),
+	Nondeterministic: true,
 }
 
 var ParseNanos = &Builtin{
@@ -2045,7 +2138,7 @@ var ParseDurationNanos = &Builtin{
 	Description: "Returns the duration in nanoseconds represented by a string.",
 	Decl: types.NewFunction(
 		types.Args(
-			types.Named("duration", types.S).Description("a duration like \"3m\"; seethe [Go `time` package documentation](https://golang.org/pkg/time/#ParseDuration) for more details"),
+			types.Named("duration", types.S).Description("a duration like \"3m\"; see the [Go `time` package documentation](https://golang.org/pkg/time/#ParseDuration) for more details"),
 		),
 		types.Named("ns", types.N).Description("the `duration` in nanoseconds"),
 	),
@@ -2437,6 +2530,7 @@ var TypeNameBuiltin = &Builtin{
  * HTTP Request
  */
 
+// Marked non-deterministic because HTTP request results can be non-deterministic.
 var HTTPSend = &Builtin{
 	Name:        "http.send",
 	Description: "Returns a HTTP response to the given HTTP request.",
@@ -2446,6 +2540,7 @@ var HTTPSend = &Builtin{
 		),
 		types.Named("response", types.NewObject(nil, types.NewDynamicProperty(types.A, types.A))),
 	),
+	Nondeterministic: true,
 }
 
 /**
@@ -2455,11 +2550,11 @@ var HTTPSend = &Builtin{
 // GraphQLParse returns a pair of AST objects from parsing/validation.
 var GraphQLParse = &Builtin{
 	Name:        "graphql.parse",
-	Description: "Returns AST objects for a given GraphQL query and schema after validating the query against the schema. Returns undefined if errors were encountered during parsing or validation.",
+	Description: "Returns AST objects for a given GraphQL query and schema after validating the query against the schema. Returns undefined if errors were encountered during parsing or validation. The query and/or schema can be either GraphQL strings or AST objects from the other GraphQL builtin functions.",
 	Decl: types.NewFunction(
 		types.Args(
-			types.Named("query", types.S),
-			types.Named("schema", types.S),
+			types.Named("query", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
+			types.Named("schema", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
 		),
 		types.Named("output", types.NewArray([]types.Type{
 			types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)),
@@ -2471,11 +2566,11 @@ var GraphQLParse = &Builtin{
 // GraphQLParseAndVerify returns a boolean and a pair of AST object from parsing/validation.
 var GraphQLParseAndVerify = &Builtin{
 	Name:        "graphql.parse_and_verify",
-	Description: "Returns a boolean indicating success or failure alongside the parsed ASTs for a given GraphQL query and schema after validating the query against the schema.",
+	Description: "Returns a boolean indicating success or failure alongside the parsed ASTs for a given GraphQL query and schema after validating the query against the schema. The query and/or schema can be either GraphQL strings or AST objects from the other GraphQL builtin functions.",
 	Decl: types.NewFunction(
 		types.Args(
-			types.Named("query", types.S),
-			types.Named("schema", types.S),
+			types.Named("query", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
+			types.Named("schema", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
 		),
 		types.Named("output", types.NewArray([]types.Type{
 			types.B,
@@ -2515,14 +2610,46 @@ var GraphQLParseSchema = &Builtin{
 // schema, and returns false for all other inputs.
 var GraphQLIsValid = &Builtin{
 	Name:        "graphql.is_valid",
-	Description: "Checks that a GraphQL query is valid against a given schema.",
+	Description: "Checks that a GraphQL query is valid against a given schema. The query and/or schema can be either GraphQL strings or AST objects from the other GraphQL builtin functions.",
 	Decl: types.NewFunction(
 		types.Args(
-			types.Named("query", types.S),
-			types.Named("schema", types.S),
+			types.Named("query", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
+			types.Named("schema", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
 		),
 		types.Named("output", types.B).Description("`true` if the query is valid under the given schema. `false` otherwise."),
 	),
+}
+
+// GraphQLSchemaIsValid returns true if the input is valid GraphQL schema,
+// and returns false for all other inputs.
+var GraphQLSchemaIsValid = &Builtin{
+	Name:        "graphql.schema_is_valid",
+	Description: "Checks that the input is a valid GraphQL schema. The schema can be either a GraphQL string or an AST object from the other GraphQL builtin functions.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("schema", types.NewAny(types.S, types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)))),
+		),
+		types.Named("output", types.B).Description("`true` if the schema is a valid GraphQL schema. `false` otherwise."),
+	),
+}
+
+/**
+ * Cloud Provider Helper Functions
+ */
+var providersAWSCat = category("providers.aws")
+
+var ProvidersAWSSignReqObj = &Builtin{
+	Name:        "providers.aws.sign_req",
+	Description: "Signs an HTTP request object for Amazon Web Services. Currently implements [AWS Signature Version 4 request signing](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-authenticating-requests.html) by the `Authorization` header method.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("request", types.NewObject(nil, types.NewDynamicProperty(types.S, types.A))),
+			types.Named("aws_config", types.NewObject(nil, types.NewDynamicProperty(types.S, types.A))),
+			types.Named("time_ns", types.N),
+		),
+		types.Named("signed_request", types.NewObject(nil, types.NewDynamicProperty(types.A, types.A))),
+	),
+	Categories: providersAWSCat,
 }
 
 /**
@@ -2567,6 +2694,7 @@ var RegoMetadataRule = &Builtin{
  * OPA
  */
 
+// Marked non-deterministic because of unpredictable config/environment-dependent results.
 var OPARuntime = &Builtin{
 	Name:        "opa.runtime",
 	Description: "Returns an object that describes the runtime environment where OPA is deployed.",
@@ -2575,6 +2703,7 @@ var OPARuntime = &Builtin{
 		types.Named("output", types.NewObject(nil, types.NewDynamicProperty(types.S, types.A))).
 			Description("includes a `config` key if OPA was started with a configuration file; an `env` key containing the environment variables that the OPA process was started with; includes `version` and `commit` keys containing the version and build commit of OPA."),
 	),
+	Nondeterministic: true,
 }
 
 /**
@@ -2614,7 +2743,6 @@ var GlobMatch = &Builtin{
 	),
 }
 
-// GlobQuoteMeta
 var GlobQuoteMeta = &Builtin{
 	Name:        "glob.quote_meta",
 	Description: "Returns a string which represents a version of the pattern where all asterisks have been escaped.",
@@ -2695,6 +2823,17 @@ Supports both IPv4 and IPv6 notations. IPv6 inputs need a prefix length (e.g. "/
 	),
 }
 
+var NetCIDRIsValid = &Builtin{
+	Name:        "net.cidr_is_valid",
+	Description: "Parses an IPv4/IPv6 CIDR and returns a boolean indicating if the provided CIDR is valid.",
+	Decl: types.NewFunction(
+		types.Args(
+			types.Named("cidr", types.S),
+		),
+		types.Named("result", types.B),
+	),
+}
+
 var netCidrContainsMatchesOperandType = types.NewAny(
 	types.S,
 	types.NewArray(nil, types.NewAny(
@@ -2714,6 +2853,7 @@ var netCidrContainsMatchesOperandType = types.NewAny(
 	)),
 )
 
+// Marked non-deterministic because DNS resolution results can be non-deterministic.
 var NetLookupIPAddr = &Builtin{
 	Name:        "net.lookup_ip_addr",
 	Description: "Returns the set of IP addresses (both v4 and v6) that the passed-in `name` resolves to using the standard name resolution mechanisms available.",
@@ -2723,6 +2863,7 @@ var NetLookupIPAddr = &Builtin{
 		),
 		types.Named("addrs", types.NewSet(types.S)).Description("IP addresses (v4 and v6) that `name` resolves to"),
 	),
+	Nondeterministic: true,
 }
 
 /**
@@ -2748,7 +2889,7 @@ var SemVerCompare = &Builtin{
 			types.Named("a", types.S),
 			types.Named("b", types.S),
 		),
-		types.Named("result", types.N).Description("`-1` if `a < b`; `1` if `b > a`; `0` if `a == b`"),
+		types.Named("result", types.N).Description("`-1` if `a < b`; `1` if `a > b`; `0` if `a == b`"),
 	),
 }
 
@@ -2787,6 +2928,7 @@ var SetDiff = &Builtin{
 		),
 		types.NewSet(types.A),
 	),
+	deprecated: true,
 }
 
 // NetCIDROverlap has been replaced by the `net.cidr_contains` built-in.
@@ -2799,6 +2941,7 @@ var NetCIDROverlap = &Builtin{
 		),
 		types.B,
 	),
+	deprecated: true,
 }
 
 // CastArray checks the underlying type of the input. If it is array or set, an array
@@ -2809,6 +2952,7 @@ var CastArray = &Builtin{
 		types.Args(types.A),
 		types.NewArray(nil, types.A),
 	),
+	deprecated: true,
 }
 
 // CastSet checks the underlying type of the input.
@@ -2821,6 +2965,7 @@ var CastSet = &Builtin{
 		types.Args(types.A),
 		types.NewSet(types.A),
 	),
+	deprecated: true,
 }
 
 // CastString returns input if it is a string; if not returns error.
@@ -2831,6 +2976,7 @@ var CastString = &Builtin{
 		types.Args(types.A),
 		types.S,
 	),
+	deprecated: true,
 }
 
 // CastBoolean returns input if it is a boolean; if not returns error.
@@ -2840,6 +2986,7 @@ var CastBoolean = &Builtin{
 		types.Args(types.A),
 		types.B,
 	),
+	deprecated: true,
 }
 
 // CastNull returns null if input is null; if not returns error.
@@ -2849,6 +2996,7 @@ var CastNull = &Builtin{
 		types.Args(types.A),
 		types.NewNull(),
 	),
+	deprecated: true,
 }
 
 // CastObject returns the given object if it is null; throws an error otherwise
@@ -2858,6 +3006,7 @@ var CastObject = &Builtin{
 		types.Args(types.A),
 		types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)),
 	),
+	deprecated: true,
 }
 
 // RegexMatchDeprecated declares `re_match` which has been deprecated. Use `regex.match` instead.
@@ -2870,6 +3019,7 @@ var RegexMatchDeprecated = &Builtin{
 		),
 		types.B,
 	),
+	deprecated: true,
 }
 
 // All takes a list and returns true if all of the items
@@ -2915,10 +3065,11 @@ type Builtin struct {
 	// "minus" for example, is part of two categories: numbers and sets. (NOTE(sr): aspirational)
 	Categories []string `json:"categories,omitempty"`
 
-	Decl       *types.Function `json:"decl"`               // Built-in function type declaration.
-	Infix      string          `json:"infix,omitempty"`    // Unique name of infix operator. Default should be unset.
-	Relation   bool            `json:"relation,omitempty"` // Indicates if the built-in acts as a relation.
-	deprecated bool            // Indicates if the built-in has been deprecated.
+	Decl             *types.Function `json:"decl"`               // Built-in function type declaration.
+	Infix            string          `json:"infix,omitempty"`    // Unique name of infix operator. Default should be unset.
+	Relation         bool            `json:"relation,omitempty"` // Indicates if the built-in acts as a relation.
+	deprecated       bool            // Indicates if the built-in has been deprecated.
+	Nondeterministic bool            `json:"nondeterministic,omitempty"` // Indicates if the built-in returns non-deterministic results.
 }
 
 // category is a helper for specifying a Builtin's Categories
@@ -2929,6 +3080,11 @@ func category(cs ...string) []string {
 // IsDeprecated returns true if the Builtin function is deprecated and will be removed in a future release.
 func (b *Builtin) IsDeprecated() bool {
 	return b.deprecated
+}
+
+// IsDeterministic returns true if the Builtin function returns non-deterministic results.
+func (b *Builtin) IsNondeterministic() bool {
+	return b.Nondeterministic
 }
 
 // Expr creates a new expression for the built-in with the given operands.

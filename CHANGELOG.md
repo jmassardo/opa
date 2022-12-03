@@ -5,6 +5,585 @@ project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+## 0.46.1
+
+This is  bugfix release to resolve an issue in the release pipeline. Everything else is
+the same as 0.46.0.
+
+## 0.46.0
+
+This release contains a mix of bugfixes, optimizations, and new features.
+
+### New language feature: refs in rule heads
+
+With this version of OPA, we can use a shorthand for defining deeply-nested structures
+in Rego:
+
+Before, we had to use multiple packages, and hence multiple files to define a structure
+like this:
+```json
+{
+  "method": {
+    "get": {
+      "allowed": true
+    }
+    "post": {
+      "allowed": true
+    }
+  }
+}
+```
+
+```rego
+package method.get
+default allowed := false
+allowed { ... }
+```
+
+
+```rego
+package method.post
+default allowed := false
+allowed { ... }
+```
+
+Now, we can define those rules in single package (and file):
+
+```rego
+package method
+import future.keywords.if
+default get.allowed := false
+get.allowed if { ... }
+
+default post.allowed := false
+post.allowed if { ... }
+```
+
+Note that in this example, the use of the future keyword `if` is mandatory
+for backwards-compatibility: without it, `get.allowed` would be interpreted
+as `get["allowed"]`, a definition of a partial set rule.
+
+Currently, variables may only appear in the last part of the rule head:
+
+```rego
+package method
+import future.keywords.if
+
+endpoints[ep].allowed if ep := "/v1/data" # invalid
+repos.get.endpoint[x] if x := "/v1/data" # valid
+```
+
+The valid rule defines this structure:
+```json
+{
+  "method": {
+    "repos": {
+      "get": {
+        "endpoint": {
+          "/v1/data": true
+        }
+      }
+    }
+  }
+}
+```
+
+To define a nested key-value pair, we would use
+
+```rego
+package method
+import future.keywords.if
+
+repos.get.endpoint[x] = y if {
+  x := "/v1/data"
+  y := "example"
+}
+```
+
+Multi-value rules (previously referred to as "partial set rules") that are
+nested like this need to use `contains` future keyword, to differentiate them
+from the "last part is a variable" case mentioned just above:
+
+```rego
+package method
+import future.keywords.contains
+
+repos.get.endpoint contains x if x := "/v1/data"
+```
+
+This rule defines the same structure, but with multiple values instead of a key:
+```json
+{
+  "method": {
+    "repos": {
+      "get": {
+        "endpoint": ["/v1/data"]
+      }
+    }
+  }
+}
+```
+
+To ensure that it's safe to build OPA policies for older OPA versions, a new
+capabilities field was introduced: "features". It's a free-form string array:
+
+```json
+{
+  "features": [
+    "rule_head_ref_string_prefixes"
+  ]
+}
+```
+
+If this key is not present, the compiler will reject ref-heads. This could be
+case when building bundles for older OPA version using their capabilities.
+
+
+### Entrypoint annotations in rule metadata
+
+It is now possible to annotate a rule with `entrypoint: true`, and it will
+automatically be picked up by the tooling that expected `--entrypoint` (`-e`)
+parameters before.
+
+For example, to build this rego policy into a wasm module, you had to pass
+an entrypoint:
+
+```rego
+package test
+allow {
+    input.x
+}
+```
+- `opa build --target wasm --entrypoint test/allow policy.rego`
+
+With the annotation:
+```rego
+package test
+
+# METADATA
+# entrypoint: true
+allow {
+    input.x
+}
+```
+- `opa build --target wasm policy.rego`
+
+The places where entrypoints are taken from metadata are:
+
+1. Building optimized bundles
+2. Building Wasm bundles
+3. Building Plan bundles
+4. Using optimization with `opa eval`
+
+Knowing a module's entrypoints can also help in different analysis tasks.
+
+### New Built-in Functon: `graphql.schema_is_valid`
+
+The new built-in allows checking schemas:
+
+```rego
+schema := `
+  extend type User {
+      id: ID!
+  }
+  extend type Product {
+      upc: String!
+  }
+  union _Entity = Product | User
+  extend type Query {
+    entity: _Entity
+  }
+`
+valid_schema_example {
+    graphql.schema_is_valid(schema)
+}
+```
+
+Requested by @olegroom.
+
+### New Built-in Functon: `net.cidr_is_valid`
+
+The new built-in function allows checking if a string is a valid CIDR.
+
+```rego
+valid_cidr_example {
+	net.cidr_is_valid("192.168.0.0/24")
+}
+```
+
+Authored by @ricardomaraschini.
+
+### Tooling, SDK, and Runtime
+
+- `opa build`: exit with failure on empty signing key ([#4972](https://github.com/open-policy-agent/opa/issues/4972)) authored by @Joffref reported by @caldwecr
+- `opa exec`: add `--fail` and `--fail-defined` flags ([#5007](https://github.com/open-policy-agent/opa/issues/5007)) authored by @byronic reported by @phantlantis
+- `opa exec`: convert slashes of explicit bundles (Windows) ([#5134](https://github.com/open-policy-agent/opa/issues/5134)) reported by @peterchenadded
+- `opa test`: check coverage limit range `[0, 100]` ([#5284](https://github.com/open-policy-agent/opa/issues/5284)) authored by @hzliangbin reported by @aholmis
+- `opa build`+`opa check`: respect capabilities for parsing, i.e. future keywords ([#5323](https://github.com/open-policy-agent/opa/issues/5323)) reported by @TheLunaticScripter
+- `opa bench --e2e`: support providing OPA config ([#4899](https://github.com/open-policy-agent/opa/issues/4899))
+- `opa eval`: new explain mode, `--explain=debug`, that includes unifcations in traces (authored by @jaspervdj)
+
+- Decision logs: Allow rule-based dropping of decision log entries ([#3945](https://github.com/open-policy-agent/opa/issues/3945)) authored by @mariusblarsen and @iamatwork
+- Decision Logs: Include the `req_id` attribute in the decision logs ([#5006](https://github.com/open-policy-agent/opa/issues/5006)) reported and authored by @humbertoc-silva
+- Plugins: export OpenTelemetry TracerProvider for use in plugins (authored by @vinhph0906)
+
+
+### Compiler + Topdown
+
+- `graph.reachable_path`: fix issue with missing subpaths ([#4666](https://github.com/open-policy-agent/opa/issues/4666)) authored by @fredallen-wk
+- `http.send`: Ensure `force_cache` attribute ignores `Date` header ([#4960](https://github.com/open-policy-agent/opa/issues/4960)) reported by @bartandacc
+- `with`: Allow replacing functions with rules ([#5299](https://github.com/open-policy-agent/opa/issues/5299))
+- Evaluation: Skip default functions in full extent ([#5202](https://github.com/open-policy-agent/opa/issues/5202)) reported by @ericjkao
+- Evaluation: capture more cases of conflicts in function evaluation ([#5272](https://github.com/open-policy-agent/opa/issues/5272))
+- Rule Indexing: fix incorrect results from indexing `glob.match` even if output is captured ([#5283](https://github.com/open-policy-agent/opa/issues/5283))
+
+- Planner: various correctness fixes: [#5271](https://github.com/open-policy-agent/opa/issues/5271), [#5265](https://github.com/open-policy-agent/opa/issues/5265), [#5252](https://github.com/open-policy-agent/opa/issues/5252)
+
+- Builtins: Refactor registration functions and signatures (authored by @philipaconrad)
+- Compiler: Speed up typechecker when working with Refs (authored by @philipaconrad)
+- Trace: add `UnifyOp` to tracer events (authored by @jaspervdj)
+
+### Documentation
+
+- Envoy Tutorial: use latest proxy_init (v8)
+- Envoy Plugin: Add note about new config param to skip body parsing
+- Policy Reference: Add `semver` examples
+- Contributing Code: Provide some tips for style fixes
+
+### Website + Ecosystem
+
+- Website: Make "outdated version" banner red if looked-at version is ancient
+- Ecosystem: Add CircleCI and Topaz
+
+### Miscellaneous
+
+- Code Cleanup:
+  - Don't use the deprecated `ioutil` functions
+  - Use `t.Setenv` in tests
+  - Use `t.TempDir` to create temporary test directory (authored by @Juneezee)
+  - Linters: add `unconvert` and `tenv`
+- internal/strvals: port helm strvals fix (CLI --set arguments), reported by @pjbgf, helm fix authored by @mattfarina
+- Wasm: Update README
+
+- Dependency bumps, notably:
+  - Golang: 1.19.2 -> 1.19.3
+  - golang.org/x/text 0.3.7 -> 0.4.0
+  - oras.land/oras-go 1.2.0 -> 1.2.1
+
+## 0.45.0
+
+This release contains a mix of bugfixes, optimizations, and new features.
+
+### Improved Decision Logging with `nd_builtin_cache`
+
+OPA has several non-deterministic built-ins, such as `rand.intn` and
+`http.send` that can make debugging policies from decision log results
+a surprisingly tricky and involved process. To improve the situation
+around debugging policies that use those built-ins, OPA now provides
+an opt-in system for caching the inputs and outputs of these built-ins
+during policy evaluation, and can include this information in decision
+log entries.
+
+A new top-level config key is used to enable the non-deterministic
+builtin caching feature, as shown below:
+
+    nd_builtin_cache: true
+
+This data is exposed to OPA's [decision log masking system](https://www.openpolicyagent.org/docs/v0.45.0/management-decision-logs/#masking-sensitive-data)
+under the `/nd_builtin_cache` path, which allows masking or dropping
+sensitive values from decision logs selectively. This can be useful
+in situations where only some information about a non-deterministic
+built-in was needed, or the arguments to the built-in involved
+sensitive data.
+
+To prevent unexpected decision log size growth from non-deterministic
+built-ins like `http.send`, the new cache information is included in
+decision logs on a best-effort basis. If a decision log event exceeds
+the `decision_logs.reporting.upload_size_limit_bytes` limit for an OPA
+instance, OPA will reattempt uploading it, after dropping the non-
+deterministic builtin cache information from the event. This behavior
+will trigger a log error when it happens, and will increment the
+`decision_logs_nd_builtin_cache_dropped` metrics counter, so that it
+will be possible to debug cases where the cache information is unexpectedly
+missing from a decision log entry.
+
+#### Decision Logging Example
+
+To observe the change in decision logging we can run OPA in server mode
+with `nd_builtin_cache` enabled:
+
+```bash
+opa run -s --set=decision_logs.console=true,nd_builtin_cache=true
+```
+
+After sending it the query `x := rand.intn("a", 15)` we should see
+something like the following in the decision logs:
+
+```
+{..., "msg":"Decision Log", "nd_builtin_cache":{"rand.intn":{"[\"a\",15]":3}}, "query":"assign(x, rand.intn(\"a\", 15))", ..., "result":[{"x":3}], ..., "type":"openpolicyagent.org/decision_logs"}
+```
+
+The new information is included under the optional `nd_builtin_cache`
+JSON key, and shows what arguments were provided for each unique
+invocation of `rand.intn`, as well as what the output of that builtin
+call was (in this case, `3`).
+
+If we sent the query `x := rand.intn("a", 15); y := rand.intn("b", 150)"`
+we can see how unique input arguments get recorded in the cache:
+
+```
+{..., "msg":"Decision Log", "nd_builtin_cache":{"rand.intn":{"[\"a\",15]":12,"[\"b\",150]":149}}, "query":"assign(x, rand.intn(\"a\", 15)); assign(y, rand.intn(\"b\", 150))", ..., "result":[{"x":12,"y":149}], ..., "type":"openpolicyagent.org/decision_logs"}
+```
+
+With this information, it's now easier to debug exactly why a particular
+rule is used or why a rule fails when non-deterministic builtins are used in
+a policy.
+
+### New Built-in Function: `regex.replace`
+
+This release introduces a new builtin for regex-based search/replace on
+strings: `regex.replace`.
+
+See [the built-in functions docs for all the details](https://www.openpolicyagent.org/docs/v0.45.0/policy-reference/#builtin-regex-regexreplace)
+
+This implementation fixes [#5162](https://github.com/open-policy-agent/opa/issues/5162) and was authored by @boranx.
+
+### `object.union_n` Optimization
+
+The `object.union_n` builtin allows easily merging together an array of Objects.
+
+Unfortunately, as noted in [#4985](https://github.com/open-policy-agent/opa/issues/4985)
+its implementation generated unnecessary intermediate copies from doing
+pairwise, recursive Object merges. These pairwise merges resulted in poor
+performance for large inputs; in many cases worse than writing the
+equivalent operation in pure Rego.
+
+This release changes the `object.union_n` builtin's implementation to use
+a more efficient merge algorithm that respects the original implementation's
+sequential, left-to-right merging semantics. The `object.union_n` builtin
+now provides a 2-3x improvement in speed and memory efficiency over the pure
+Rego equivalent.
+
+### Tooling, SDK, and Runtime
+
+- cli: Fix doubled CLI hints/errors. ([#5115](https://github.com/open-policy-agent/opa/issues/5115)) authored by @ivanphdz
+- cli/test: Add capabilities flag to test command. (authored by @ivanphdz)
+- fmt: Fix blank lines after multiline expressions. (authored by @jaspervdj)
+- internal/report: Include heap usage in the telemetry report.
+- plugins/logs: Improve error message when decision log chunk size is greater than the upload limit. ([#5155](https://github.com/open-policy-agent/opa/issues/5155))
+- ir: Make the `internal/ir` package public as `ir`.
+
+### Rego
+
+- ast/parser+formatter: Allow 'if' in rule 'else' statements.
+- ast/schema: Add support for recursive json schema elements. ([#5166](https://github.com/open-policy-agent/opa/issues/5166)) authored and reported by @liamg
+- ast/schema: Fix race condition in parsing with reused references.(authored by @liamg)
+- internal/gojsonschema: Fix race condition in `SetAllowNet`. ([#5187](https://github.com/open-policy-agent/opa/issues/5187)) authored and reported by @liamg
+- ast/compiler: Rewrite declared variables in function calls and recursively rewrite local variables in `with` clauses. ([#5148](https://github.com/open-policy-agent/opa/issues/5148)) authored and reported by @liu-du
+- ast: Skip rules when parsing a body (or query) to help improve ambiguous parsing cases.
+
+### Topdown
+
+- topdown/object: Rework `object.union_n` to use in-place merge algorithm. (reported by @charlesdaniels)
+- topdown/jwt_decode_verify: Ensure `exp` and `nbf` fields are numbers when present. ([#5165](https://github.com/open-policy-agent/opa/issues/5165)) authored and reported by @charlieflowers
+- topdown: Fix `InterQueryCache` only dropping one entry when over the size limit. (authored by @vinhph0906)
+- topdown+builtins: Block all ND builtins from partial evaluation.
+- topdown/builtins: Add Rego Object support for GraphQL builtins to improve composability.
+- topdown/json: Fix panic in `json.filter` on empty JSON paths.
+- topdown/sets_bench_test: Add `intersection` builtin tests.
+- topdown/tokens: Protect against nistec panics. ([#5128](https://github.com/open-policy-agent/opa/issues/5218))
+
+### Documentation
+
+- Add IR to integration docs.
+- Added Gloo Edge Tutorial with examples. (authored by @Parsifal-M)
+- Updated examples for CLI commands.
+- Updated section on performance metrics (authored by @hutchins)
+- docs/annotations: Add policy example and a link to the policy reference. ([#4937](https://github.com/open-policy-agent/opa/issues/4937)) authored by @Parsifal-M
+- docs/policy-language: Be more explicit about future keywords.
+- docs/security: Fix token authz example. (authored by @pigletfly)
+- docs: Update generated CLI docs. (authored by @charlieflowers)
+- docs: Update mentions of `#development` to `#contributors`. (authored by @charlieflowers)
+
+### Website + Ecosystem
+
+- website/security: Style improvements. (authored by @orweis)
+
+### Miscellaneous
+
+- ci: Add `prealloc` linter check and linter fixes.
+- ci: Add govulncheck to Nightly CI.
+- build/wasm: Use golang1.16 `go:embed` mechanism.
+- util/backoff: Seed from math/rand source.
+- version: Use `runtime/debug.BuildInfo`.
+
+- Dependency bumps, notably:
+  - build: bump golang 1.19.1 -> 1.19.2
+  - build(deps): bump golang.org/x/net
+  - build(deps): bump internal/gqlparser to v2.5.1
+  - build(deps): bump tj-actions/changed-files from 29.0.3 -> 32.0.0
+  - deps(build): bump wasmtime-go 0.36.0 -> 1.0.0 (authored by @Parsifal-M)
+
+## 0.44.0
+
+This release contains a number of fixes, two new builtins, a few new features,
+and several performance improvements.
+
+### Security Fixes
+
+This release includes the security fixes present in the recent v0.43.1 release,
+which mitigate CVE-2022-36085 in OPA itself, and CVE-2022-27664 and
+CVE-2022-32190 in our Go build tooling.
+
+See the Release Notes for v0.43.1 for more details.
+
+### Set Element Addition Optimization
+
+Rego Set element addition operations did not scale linearly ([#4999](https://github.com/open-policy-agent/opa/pull/4999))
+in the past, and like the Object type before v0.43.0, experienced noticeable
+reallocation/memory movement overheads once the Set grew past 120k-150k elements
+in size.
+
+This release introduces different handling of Set internals during element
+addition operations to avoid pathological reallocation behavior, and allows
+linear performance scaling up into the 500k key range and beyond.
+
+### Set `union` Built-in Optimization
+
+The Set `union` builtin allows applying the union operation to a set of sets.
+
+However, as discovered in [#4979](https://github.com/open-policy-agent/opa/issues/4979),
+its implementation generated unnecessary intermediate copies, which resulted in
+poor performance; in many cases, worse than writing the equivalent operation in
+pure Rego.
+
+This release improves the `union` builtin's implementation, such that only the
+final result set is ever modified, reducing memory allocations and GC pressure.
+The `union` builtin is now about 15-30% faster than the equivalent operation in
+pure Rego.
+
+### New Built-in Functions: `strings.any_prefix_match` and `strings.any_suffix_match`
+
+This release introduces two new builtins, optimized for bulk matching of string
+prefixes and suffixes: `strings.any_prefix_match`, and
+`strings.any_suffix_match`.
+It works with sets and arrays of strings, allowing efficient matching of
+collections of prefixes or suffixes against a target string.
+
+See [the built-in functions docs for all the details](https://www.openpolicyagent.org/docs/v0.42.0/policy-reference/#builtin-strings-stringsany_prefix_match)
+
+This implementation fixes [#4994](https://github.com/open-policy-agent/opa/issues/4994) and was authored by @cube2222.
+
+### Tooling, SDK, and Runtime
+
+- Logger: Allow configuration of the timestamp format ([#2413](https://github.com/open-policy-agent/opa/issues/2413))
+- loader: Add support for fs.FS (authored by @ear7h)
+
+#### Bundles
+
+This release includes several bugfixes and improvements around bundle building:
+
+- cmd: Add optimize flag to OPA eval command to allow building optimized bundles
+- cmd/build+compile: Allow opt-out of dependents gathering to allow compilation of more bundles into WASM ([#5035](https://github.com/open-policy-agent/opa/issues/5035))
+- opa build -t wasm|plan: Fail on unmatched entrypoints ([#3957](https://github.com/open-policy-agent/opa/issues/3957))
+- opa build: Fix bundle mode to work with ignore flag
+- bundle/status: Include bundle size in status information
+- bundle: Remove raw bytes check for lazy bundle loading mode
+
+#### Storage Fixes
+
+This release has performance improvements and bugfixes for the disk storage system:
+
+- storage/disk: Improve handling of in-flight transactions during truncate operations ([#4900](https://github.com/open-policy-agent/opa/issues/4900))
+- storage/inmem: Allow disabling `util.Roundtrip` on Write for improved performance ([#4708](https://github.com/open-policy-agent/opa/issues/4708))
+- storage: Improve multi-bundle data with overlapping roots is handled ([#4998](https://github.com/open-policy-agent/opa/issues/4998)) reported by @sirpi
+- storage: Fix issue with policyID in Truncate calls ([#4958](https://github.com/open-policy-agent/opa/issues/4958)) authored by @martinjoha reported by @martinjoha
+
+#### Rego
+
+- eval+rego: Support caching output of non-deterministic builtins. ([#1514](https://github.com/open-policy-agent/opa/issues/1514))
+
+#### AST and Topdown
+
+The AST and Topdown module received a number of important bugfixes in this release:
+
+- ast/term: Fix multiple-reader race condition for Sets/Objects
+- ast/compile: Respect unsafeBuiltinMap for 'with' replacements
+- ast: Add capacity to array initialization when size is known (authored by @mstrYoda)
+- topdown/object: Fix unchecked error case in `object.union_n` builtin ([#5073](https://github.com/open-policy-agent/opa/issues/5073))
+- topdown/reachable: Fix missing operand type checks. ([#4951](https://github.com/open-policy-agent/opa/issues/4951))
+- topdown/units_parse: Avoid extra decimal places for integers
+- topdown/type+wasm: Fix inconsistent `is_type` return values. ([#4943](https://github.com/open-policy-agent/opa/issues/4943))
+- builtins: Fix inconsistent error messages in `units.parse*`
+- Add query parameter in canonical request of AWS Sigv4 signature to avoid 403 errors from AWS (authored by @sinhaaks)
+
+#### Test Suite
+
+- Add error type to `units.*` builtin test assertions
+- test/e2e/certrefresh: Add `file.Sync()` to eliminate test failures due to slow disk writes
+- topdown/exported_tests: Remove Golang 1.16 x509 exception
+- cmd/bench: Fix port collision in utility function used for E2E testing
+
+### Documentation
+
+- SECURITY: Migrate policy to web site, update content ([#4272](https://github.com/open-policy-agent/opa/issues/4272)) reported by @adoliver
+- Add deprecated flag to all deprecated builtins ([#5072](https://github.com/open-policy-agent/opa/issues/5072))
+- builtins: Update description of `format_int` to say it rounds down
+- docs/policy-reference: Update Rego EBNF grammar (authored by @shaded-enmity)
+- docs/builtins: Fix typo in `semver.compare` ([#5012](https://github.com/open-policy-agent/opa/issues/5012)) reported by @tetsuya28
+- docs: Fix AWS Signature section in Configuration (authored by @pauly4it)
+- docs: Update port and bundle folder for GraphQL tutorial
+- docs: Document that function overloading is unsupported
+- docs: Fixing related_resources annotations example ([#4982](https://github.com/open-policy-agent/opa/issues/4982)) reported by @humbertoc-silva
+- docs: Fixing typo in metadata ([#5018](https://github.com/open-policy-agent/opa/issues/5018)) authored by @cimin0 reported by @cimin0
+
+### Website + Ecosystem
+
+- Update links to opa-kafka-plugin
+- Add OCI documentation (authored by @carabasdaniel)
+- Add article on using OPA for data filtering in Kafka
+- Ecosystem: Add some links to Rönd (authored by @ugho16)
+- Add community integration for Fiber (authored by @mstrYoda)
+- Add Spacelift Integration (authored by @theseanodell)
+- Fix broken link for Minio OPA integration  (authored by @unautre)
+
+- Ecosystem Additions:
+  - cosign (#5040) (authored by @Dentrax)
+
+### Miscellaneous
+
+- Dockerfile: Append root "/" to $PATH ([#5003](https://github.com/open-policy-agent/opa/issues/5003)) authored by @matusf reported by @matusf
+- Add VNG Cloud to adopters (authored by @vinhph0906)
+
+- Dependency bumps, notably:
+  - build: bump golang: 1.19 -> 1.19.1
+  - build: use go 1.19, drop go 1.16
+  - build(deps): bump aquasecurity/trivy-action from 0.6.1 -> 0.7.1
+  - build(deps): bump github.com/agnivade/levenshtein from 1.0.1 -> 1.1.1
+  - build(deps): bump github.com/containerd/containerd from 1.6.6 -> 1.6.8
+  - build(deps): bump github.com/go-ini/ini from 1.66.6 -> 1.67.0
+  - build(deps): bump github.com/prometheus/client_golang
+  - build(deps): bump google.golang.org/grpc from 1.48.0 -> 1.49.0
+  - build(deps): bump tj-actions/changed-files from 28.0.0 -> 29.0.3
+
+- Dependency removals:
+  - internal: Vendor gqlparser library ([#5065](https://github.com/open-policy-agent/opa/issues/5065)) reported by @vikstrous2
+
+## 0.43.1
+
+This is a security release fixing the following vulnerabilities:
+
+- CVE-2022-36085: Respect unsafeBuiltinMap for 'with' replacements in the compiler
+
+  See https://github.com/open-policy-agent/opa/security/advisories/GHSA-f524-rf33-2jjr for all details.
+
+- CVE-2022-27664 and CVE-2022-32190.
+
+  Fixed by updating the Go version used in our builds to 1.18.6,
+  see https://groups.google.com/g/golang-announce/c/x49AQzIVX-s.
+  Note that CVE-2022-32190 is most likely not relevant for OPA's usage of net/url.
+  But since these CVEs tend to come up in security assessment tooling regardless,
+  it's better to get it out of the way.
 ## 0.43.0
 
 This release contains a number of fixes, enhancements, and performance improvements.
@@ -120,7 +699,7 @@ It works on objects, sets, and arrays.
 If both arguments are objects, then the operation is recursive, e.g. `{"c": {"x": {10, 15, 20}}`
 is considered a subset of `{"a": "b", "c": {"x": {10, 15, 20, 25}, "y": "z"}`.
 
-See [the built-in functions docs for all details](https://www.openpolicyagent.org/docs/v0.42.0/policy-reference/#builtin-object-objectsubset)
+See [the built-in functions docs for all the details](https://www.openpolicyagent.org/docs/v0.42.0/policy-reference/#builtin-object-objectsubset)
 
 This implementation fixes [#4358](https://github.com/open-policy-agent/opa/issues/4358) and was authored by @charlesdaniels.
 

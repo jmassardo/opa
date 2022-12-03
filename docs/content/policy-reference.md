@@ -257,7 +257,7 @@ a_map[w] := z if { ... }
 ```live:rules/ordered:module:read_only
 default a := 1
 a := 5 if { ... }
-else := 10 { ... }
+else := 10 if { ... }
 ```
 
 ### Functions (Boolean)
@@ -281,6 +281,43 @@ f(x) := "A" if { x >= 90 }
 f(x) := "B" if { x >= 80; x < 90 }
 f(x) := "C" if { x >= 70; x < 80 }
 ```
+
+### Reference Heads
+
+```live:rules/ref_heads:module:read_only
+fruit.apple.seeds = 12 if input == "apple"             # complete document (single value rule)
+
+fruit.pineapple.colors contains x if x := "yellow"     # multi-value rule
+
+fruit.banana.phone[x] = "bananular" if x := "cellular" # single value rule
+fruit.banana.phone.cellular = "bananular" if true      # equivalent single value rule
+
+fruit.orange.color(x) = true if x == "orange"          # function
+```
+
+For reasons of backwards-compatibility, partial sets need to use `contains` in
+their rule hesas, i.e.
+
+```live:rules/ref_heads/set:module:read_only
+fruit.box contains "apples" if true
+```
+
+whereas
+
+```live:rules/ref_heads/complete:module:read_only
+fruit.box[x] if { x := "apples" }
+```
+
+defines a _complete document rule_ `fruit.box.apples` with value `true`.
+The same is the case of rules with brackets that don't contain dots, like
+
+```live:rules/ref_heads/simple:module:read_only
+box[x] if { x := "apples" } # => {"box": {"apples": true }}
+box2[x] { x := "apples" } # => {"box": ["apples"]}
+```
+
+For backwards-compatibility, rules _without_ if and without _dots_ will be interpreted
+as defining partial sets, like `box2`.
 
 ## Tests
 
@@ -399,7 +436,7 @@ The following algorithms are supported:
 
 
 {{< info >}}
-Note that the key's provided should be base64 encoded (without padding) as per the specification ([RFC7517](https://tools.ietf.org/html/rfc7517)).
+Note that the key's provided should be base64 URL encoded (without padding) as per the specification ([RFC7517](https://tools.ietf.org/html/rfc7517)).
 This differs from the plain text secrets provided with the algorithm specific verify built-ins described below.
 {{< /info >}}
 
@@ -620,7 +657,7 @@ raw_result_parts_hs256 := io.jwt.decode_verify(raw_result_hs256, {"secret": "foo
 ```live:jwt/verify/round_trip_raw:output
 ```
 
-Now encode the and sign the same token contents but with `io.jwt.encode_sign` instead of the `raw` varient.
+Now encode the and sign the same token contents but with `io.jwt.encode_sign` instead of the `raw` variant.
 ```live:jwt/verify/round_trip:module:hidden
 ```
 ```live:jwt/verify/round_trip:query:merge_down
@@ -665,6 +702,43 @@ Timezones can be specified as
 * "Local", which will use the local timezone.
 
 Note that the opa executable will need access to the timezone files in the environment it is running in (see the [Go `time.LoadLocation()`](https://pkg.go.dev/time#LoadLocation) documentation for more information).
+
+#### Timestamp Parsing
+
+OPA can parse timestamps of nearly arbitrary formats, and currently accepts the same inputs as Go's `time.Parse()` utility.
+As a result, you **must** describe the format of your timestamps using the Reference Timestamp that Go's `time` module expects:
+
+    2006-01-02T15:04:05Z07:00
+
+In other date formats, that same value is rendered as:
+
+ - January 2, 15:04:05, 2006, in time zone seven hours west of GMT
+ - Unix time: `1136239445`
+ - Unix `date` command output: `Mon Jan 2 15:04:05 MST 2006`
+ - RFC3339 timestamp: `2006-01-02T15:04:05Z07:00`
+
+Examples of valid values for each timestamp field:
+
+ - Year: `"2006"` `"06"`
+ - Month: `"Jan"` `"January"` `"01"` `"1"`
+ - Day of the week: `"Mon"` `"Monday"`
+ - Day of the month: `"2"` `"_2"` `"02"`
+ - Day of the year: `"__2"` `"002"`
+ - Hour: `"15"` `"3"` `"03"` (PM or AM)
+ - Minute: `"4"` `"04"`
+ - Second: `"5"` `"05"`
+ - AM/PM mark: `"PM"`
+
+For formatting of nanoseconds, time zones, and other fields, see the [Go `time/format` module documentation](https://cs.opensource.google/go/go/+/master:src/time/format.go;l=9-100).
+
+#### Timestamp Parsing Example
+
+In OPA, we can parse a simple `YYYY-MM-DD` timestamp as follows:
+
+```live:time/parse_ns/example:module
+ts := "1985-10-27"
+result := time.parse_ns("2006-01-02", ts)
+```
 
 {{< builtin-table cat=crypto title=Cryptography >}}
 
@@ -862,15 +936,95 @@ The table below shows examples of calling `http.send`:
 | Environment variables containing TLS material | ``http.send({"method": "get", "url": "https://127.0.0.1:65360", "tls_ca_cert_env_variable": "CLIENT_CA_ENV", "tls_client_cert_env_variable": "CLIENT_CERT_ENV", "tls_client_key_env_variable": "CLIENT_KEY_ENV"})`` |
 | Unix Socket URL Format| ``http.send({"method": "get", "url": "unix://localhost/?socket=%F2path%F2file.socket"})`` |
 
+{{< builtin-table cat=providers.aws title=AWS >}}
+
+The AWS Request Signing builtin in OPA implements the header-based auth,
+single-chunk method described in the [AWS SigV4 docs](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html).
+It will always sign the payload when present, and will sign most user-provided
+headers for the request, to ensure their integrity.
+
+{{< info >}}
+Note that the `authorization`, `user-agent`, and `x-amzn-trace-id` headers,
+are commonly modified by proxy systems, and as such are ignored by OPA
+for signing.
+{{< /info >}}
+
+The `request` object parameter may contain any and all of the same fields as for `http.send`.
+The following fields will have effects on the output `Authorization` header signature:
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `url` | yes | `string` | HTTP URL to specify in the request. Used in the signature. |
+| `method` | yes | `string` | HTTP method to specify in request. Used in the signature. |
+| `body` | no | `any` | HTTP message body. The JSON serialized version of this value will be used for the payload portion of the signature if present. |
+| `raw_body` | no | `string` | HTTP message body. This will be used for the payload portion of the signature if present. |
+| `headers` | no | `object` | HTTP headers to include in the request. These will be added to the list of headers to sign. |
+
+The `aws_config` object parameter may contain the following fields:
+
+| Field | Required | Type | Description |
+| --- | --- | --- | --- |
+| `aws_access_key` | yes | `string` | AWS access key. |
+| `aws_secret_access_key` | yes | `string` | AWS secret access key. Used in generating the signing key for the request. |
+| `aws_service` | yes | `string` | AWS service the request will be valid for. (e.g. `"s3"`) |
+| `aws_region` | yes | `string` | AWS region for the request. (e.g. `"us-east-1"`) |
+| `aws_session_token` | no | `string` | AWS security token. Used for the `x-amz-security-token` request header. |
+
+#### AWS Request Signing Examples
+
+##### Basic Request Signing Example
+The example below shows using hard-coded AWS credentials for signing the request
+object for `http.send`.
+
+{{< info >}}
+For deployments, a common way to provide AWS credentials is via environment
+variables, usually by using the results of `opa.runtime().env`.
+{{< /info >}}
+
+```live:providers/aws/sign_req_basic:module
+req := {"method": "get", "url": "https://examplebucket.s3.amazonaws.com/data"}
+aws_config := {
+    "aws_access_key": "MYAWSACCESSKEYGOESHERE",
+    "aws_secret_access_key": "MYAWSSECRETACCESSKEYGOESHERE",
+    "aws_service": "s3",
+    "aws_region": "us-east-1",
+}
+
+example_verify_resource {
+    resp := http.send(providers.aws.sign_req(req, aws_config, time.now_ns()))
+    # process response from AWS ...
+}
+```
+
+##### Pre-Signed Request Example
+The [AWS S3 request signing API](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html)
+supports pre-signing requests, so that they will only be valid at a future date.
+To do this in OPA, simply adjust the time parameter:
+
+```live:providers/aws/sign_req_presign:module
+env := opa.runtime().env
+req := {"method": "get", "url": "https://examplebucket.s3.amazonaws.com/data"}
+aws_config := {
+    "aws_access_key": env["AWS_ACCESS_KEY"],
+    "aws_secret_access_key": env["AWS_SECRET_ACCESS_KEY"],
+    "aws_service": "s3",
+    "aws_region": env["AWS_REGION"],
+}
+# Request will become valid 2 days from now.
+signing_time := time.add_date(time.now_ns(), 0, 0, 2)
+
+pre_signed_req := providers.aws.sign_req(req, aws_config, signing_time))
+```
+
 {{< builtin-table net >}}
 
 #### Notes on Name Resolution (`net.lookup_ip_addr`)
 
 The lookup mechanism uses either the pure-Go, or the cgo-based resolver, depending on the operating system and availability of cgo.
-The latter depends on flags that can be provided when building OPA as a Go library, and can be adjusted at runtime via the GODEBUG enviroment variable.
+The latter depends on flags that can be provided when building OPA as a Go library, and can be adjusted at runtime via the GODEBUG environment variable.
 See [these docs on the `net` package](https://pkg.go.dev/net@go1.17.3#hdr-Name_Resolution) for details.
 
-Note that the cgo-based resolver is often **preferrable**: It will take advantage of host-based DNS caching in place.
+Note that the cgo-based resolver is often **preferable**: It will take advantage of host-based DNS caching in place.
 This built-in function only caches DNS lookups within _a single_ policy evaluation.
 
 #### Examples of `net.cidr_contains_matches`
@@ -928,6 +1082,29 @@ net.cidr_contains_matches({["1.1.0.0/16", "foo"], "1.1.2.0/24"}, {"x": "1.1.1.12
 {{< builtin-table cat=uuid title=UUID >}}
 {{< builtin-table cat=semver title="Semantic Versions" >}}
 
+#### Example of `semver.is_valid`
+
+The `result := semver.is_valid(vsn)` function checks to see if a version
+string is of the form: `MAJOR.MINOR.PATCH[-PRERELEASE][+METADATA]`, where
+items in square braces are optional elements.
+
+When working with Go-style semantic versions, remember to remove the
+leading `v` character, or the semver string will be marked as invalid!
+
+```live:semverisvalid:module:hidden
+package semverisvalid
+```
+```live:semverisvalid/invalid:query:merge_down
+semver.is_valid("v1.1.12-rc1+foo")
+```
+```live:semverisvalid/invalid:output
+```
+```live:semverisvalid/valid:query:merge_down
+semver.is_valid("1.1.12-rc1+foo")
+```
+```live:semverisvalid/valid:output
+```
+
 {{< builtin-table rego >}}
 
 #### Example
@@ -951,7 +1128,7 @@ package example
 
 # METADATA
 # title: Deny invalid numbers
-# description: Numbers may not be higer than 5
+# description: Numbers may not be higher than 5
 # custom:
 #  severity: MEDIUM
 deny[format(rego.metadata.rule())] {
@@ -1075,11 +1252,11 @@ Go (library) | `io.Writer` | [https://pkg.go.dev/github.com/open-policy-agent/op
 
 By default, explanations are disabled. The following table summarizes how you can enable tracing:
 
-API | Parameter | Example | Memo
---- | --- | --- | ---
-CLI | `--explain` | `opa eval --explain=notes --format=pretty 'trace("hello world")'` |
-HTTP | `explain=notes` | `curl localhost:8181/v1/data/example/allow?explain=notes&pretty` |
-REPL | `notes` | n/a | The "notes" command enables trace explanations. See `help` for more details.
+API | Parameter | Example
+--- | --- | ---
+CLI | `--explain` | `opa eval --explain=notes --format=pretty 'trace("hello world")'`
+HTTP | `explain=notes` | `curl localhost:8181/v1/data/example/allow?explain=notes&pretty`
+REPL | n/a | `trace notes`
 
 ## Reserved Names
 
@@ -1110,29 +1287,33 @@ package         = "package" ref
 import          = "import" ref [ "as" var ]
 policy          = { rule }
 rule            = [ "default" ] rule-head { rule-body }
-rule-head       = var ( rule-head-set | rule-head-obj | rule-head-func | rule-head-comp )
-rule-head-comp  = [ ( ":=" | "=" ) term ]) [ "if" ]
-rule-head-obj   = [ "[" term "]" ] [ ( ":=" | "=" ) term ]) [ "if" ]
-rule-head-func  = [ "(" rule-args ")" ] [ ( ":=" | "=" ) term ]) [ "if" ]
+rule-head       = ( ref | var ) ( rule-head-set | rule-head-obj | rule-head-func | rule-head-comp )
+rule-head-comp  = [ assign-operator term ] [ "if" ]
+rule-head-obj   = "[" term "]" [ assign-operator term ] [ "if" ]
+rule-head-func  = "(" rule-args ")" [ assign-operator term ] [ "if" ]
 rule-head-set   = "contains" term [ "if" ] | "[" term "]"
 rule-args       = term { "," term }
-rule-body       = [ "else" [ ( ":=" | "=" ) term ] ] "{" query "}"
+rule-body       = [ "else" [ assign-operator term ] [ "if" ] ] ( "{" query "}" ) | literal
 query           = literal { ( ";" | ( [CR] LF ) ) literal }
 literal         = ( some-decl | expr | "not" expr ) { with-modifier }
 with-modifier   = "with" term "as" term
 some-decl       = "some" term { "," term } { "in" expr }
-expr            = term | expr-call | expr-infix | expr-every
+expr            = term | expr-call | expr-infix | expr-every | expr-parens | unary-expr
 expr-call       = var [ "." var ] "(" [ expr { "," expr } ] ")"
-expr-infix      = [ term "=" ] expr infix-operator expr
+expr-infix      = expr infix-operator expr
 expr-every      = "every" var { "," var } "in" ( term | expr-call | expr-infix ) "{" query "}"
-term            = ref | var | scalar | array | object | set | array-compr | object-compr | set-compr
-array-compr     = "[" term "|" rule-body "]"
-set-compr       = "{" term "|" rule-body "}"
-object-compr    = "{" object-item "|" rule-body "}"
-infix-operator  = bool-operator | arith-operator | bin-operator
+expr-parens     = "(" expr ")"
+unary-expr      = "-" expr
+membership      = term [ "," term ] "in" term
+term            = ref | var | scalar | array | object | set | membership | array-compr | object-compr | set-compr
+array-compr     = "[" term "|" query "]"
+set-compr       = "{" term "|" query "}"
+object-compr    = "{" object-item "|" query "}"
+infix-operator  = assign-operator | bool-operator | arith-operator | bin-operator
 bool-operator   = "==" | "!=" | "<" | ">" | ">=" | "<="
 arith-operator  = "+" | "-" | "*" | "/"
 bin-operator    = "&" | "|"
+assign-operator = ":=" | "="
 ref             = ( var | array | object | set | array-compr | object-compr | set-compr | expr-call ) { ref-arg }
 ref-arg         = ref-arg-dot | ref-arg-brack
 ref-arg-brack   = "[" ( scalar | var | array | object | set | "_" ) "]"

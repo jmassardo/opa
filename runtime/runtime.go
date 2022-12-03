@@ -22,7 +22,9 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/mux"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
+	"go.opentelemetry.io/otel/propagation"
 	"go.uber.org/automaxprocs/maxprocs"
 
 	"github.com/open-policy-agent/opa/ast"
@@ -213,8 +215,9 @@ type Params struct {
 
 // LoggingConfig stores the configuration for OPA's logging behaviour.
 type LoggingConfig struct {
-	Level  string
-	Format string
+	Level           string
+	Format          string
+	TimestampFormat string
 }
 
 // NewParams returns a new Params object.
@@ -267,7 +270,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	// that the logging configuration is applied. Once we remove all usage of
 	// the global logger and we remove the API that allows callers to access the
 	// global logger, we can remove this.
-	logging.Get().SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+	logging.Get().SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 	logging.Get().SetLevel(level)
 
 	var logger logging.Logger
@@ -277,7 +280,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	} else {
 		stdLogger := logging.New()
 		stdLogger.SetLevel(level)
-		stdLogger.SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+		stdLogger.SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 		logger = stdLogger
 	}
 
@@ -295,7 +298,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		}
 	}
 
-	loaded, err := initload.LoadPaths(params.Paths, params.Filter, params.BundleMode, params.BundleVerificationConfig, params.SkipBundleVerification)
+	loaded, err := initload.LoadPaths(params.Paths, params.Filter, params.BundleMode, params.BundleVerificationConfig, params.SkipBundleVerification, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("load error: %w", err)
 	}
@@ -308,7 +311,7 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 	consoleLogger := params.ConsoleLogger
 	if consoleLogger == nil {
 		l := logging.New()
-		l.SetFormatter(internal_logging.GetFormatter(params.Logging.Format))
+		l.SetFormatter(internal_logging.GetFormatter(params.Logging.Format, params.Logging.TimestampFormat))
 		consoleLogger = l
 	}
 
@@ -332,7 +335,18 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 			return nil, fmt.Errorf("initialize disk store: %w", err)
 		}
 	} else {
-		store = inmem.New()
+		store = inmem.NewWithOpts(inmem.OptRoundTripOnWrite(false))
+	}
+
+	traceExporter, tracerProvider, err := internal_tracing.Init(ctx, config, params.ID)
+	if err != nil {
+		return nil, fmt.Errorf("config error: %w", err)
+	}
+	if tracerProvider != nil {
+		params.DistributedTracingOpts = tracing.NewOptions(
+			otelhttp.WithTracerProvider(tracerProvider),
+			otelhttp.WithPropagators(propagation.TraceContext{}),
+		)
 	}
 
 	manager, err := plugins.New(config,
@@ -348,21 +362,14 @@ func NewRuntime(ctx context.Context, params Params) (*Runtime, error) {
 		plugins.EnablePrintStatements(logger.GetLevel() >= logging.Info),
 		plugins.PrintHook(loggingPrintHook{logger: logger}),
 		plugins.WithRouter(params.Router),
-		plugins.WithPrometheusRegister(metrics))
+		plugins.WithPrometheusRegister(metrics),
+		plugins.WithTracerProvider(tracerProvider))
 	if err != nil {
 		return nil, fmt.Errorf("config error: %w", err)
 	}
 
 	if err := manager.Init(ctx); err != nil {
 		return nil, fmt.Errorf("initialization error: %w", err)
-	}
-
-	traceExporter, distributedTracingOpts, err := internal_tracing.Init(ctx, config, params.ID)
-	if err != nil {
-		return nil, fmt.Errorf("config error: %w", err)
-	}
-	if distributedTracingOpts != nil {
-		params.DistributedTracingOpts = distributedTracingOpts
 	}
 
 	disco, err := discovery.New(manager, discovery.Factories(registeredPlugins), discovery.Metrics(metrics))
@@ -472,6 +479,11 @@ func (rt *Runtime) Serve(ctx context.Context) error {
 		WithMetrics(rt.metrics).
 		WithMinTLSVersion(rt.Params.MinTLSVersion).
 		WithDistributedTracingOpts(rt.Params.DistributedTracingOpts)
+
+	// If decision_logging plugin enabled, check to see if we opted in to the ND builtins cache.
+	if lp := logs.Lookup(rt.Manager); lp != nil {
+		rt.server = rt.server.WithNDBCacheEnabled(rt.Manager.Config.NDBuiltinCacheEnabled())
+	}
 
 	if rt.Params.DiagnosticAddrs != nil {
 		rt.server = rt.server.WithDiagnosticAddresses(*rt.Params.DiagnosticAddrs)
@@ -704,7 +716,7 @@ func (rt *Runtime) readWatcher(ctx context.Context, watcher *fsnotify.Watcher, p
 
 func (rt *Runtime) processWatcherUpdate(ctx context.Context, paths []string, removed string) error {
 
-	loaded, err := initload.LoadPaths(paths, rt.Params.Filter, rt.Params.BundleMode, nil, true)
+	loaded, err := initload.LoadPaths(paths, rt.Params.Filter, rt.Params.BundleMode, nil, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -838,7 +850,7 @@ func (rt *Runtime) getWatcher(rootPaths []string) (*fsnotify.Watcher, error) {
 
 func errorLogger(logger logging.Logger) func(attrs map[string]interface{}, f string, a ...interface{}) {
 	return func(attrs map[string]interface{}, f string, a ...interface{}) {
-		logger.WithFields(map[string]interface{}(attrs)).Error(f, a...)
+		logger.WithFields(attrs).Error(f, a...)
 	}
 }
 

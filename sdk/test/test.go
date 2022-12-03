@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -111,7 +110,7 @@ func (s *Server) URL() string {
 // Builds the tarball from the supplied policies and prepares the layers in a temporary directory
 func (s *Server) buildBundles(ref string, policies map[string]string) error {
 	// Prepare the modules to include in the bundle. Sort them so bundles are deterministic.
-	var modules []bundle.ModuleFile
+	modules := make([]bundle.ModuleFile, 0, len(policies))
 	for url, str := range policies {
 		module, err := ast.ParseModule(url, str)
 		if err != nil {
@@ -142,13 +141,13 @@ func (s *Server) buildBundles(ref string, policies map[string]string) error {
 	}
 	// Write buf tarball to layer
 	tarLayer := filepath.Join(directoryName, "tar.layer")
-	err = ioutil.WriteFile(tarLayer, buf.Bytes(), 0655)
+	err = os.WriteFile(tarLayer, buf.Bytes(), 0655)
 	if err != nil {
 		return err
 	}
 	// Write empty config layer
 	configLayer := filepath.Join(directoryName, "config.layer")
-	err = ioutil.WriteFile(configLayer, []byte("{}"), 0655)
+	err = os.WriteFile(configLayer, []byte("{}"), 0655)
 	if err != nil {
 		return err
 	}
@@ -187,7 +186,7 @@ func (s *Server) buildBundles(ref string, policies map[string]string) error {
 		return err
 	}
 	manifestLayer := filepath.Join(directoryName, "manifest.layer")
-	err = ioutil.WriteFile(manifestLayer, manifestData, 0655)
+	err = os.WriteFile(manifestLayer, manifestData, 0655)
 	if err != nil {
 		return err
 	}
@@ -306,7 +305,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", manifestSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["manifest"])
+		bs, err := os.ReadFile(layers["manifest"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -323,7 +322,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", configSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["config"])
+		bs, err := os.ReadFile(layers["config"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -340,7 +339,7 @@ func (s *Server) handleOCIBundles(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Add("Docker-Content-Digest", fmt.Sprintf("sha256:%x", tarSHA))
 		w.WriteHeader(200)
-		bs, err := ioutil.ReadFile(layers["tar"])
+		bs, err := os.ReadFile(layers["tar"])
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -364,7 +363,7 @@ func (s *Server) handleBundles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Prepare the modules to include in the bundle. Sort them so bundles are deterministic.
-	var modules []bundle.ModuleFile
+	modules := make([]bundle.ModuleFile, 0, len(b))
 	for url, str := range b {
 		module, err := ast.ParseModule(url, str)
 		if err != nil {

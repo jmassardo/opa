@@ -6,6 +6,7 @@ package cache
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/open-policy-agent/opa/ast"
@@ -117,6 +118,92 @@ func TestInsert(t *testing.T) {
 	_, found = cache.Get(ast.StringTerm("foo").Value)
 	if found {
 		t.Fatal("Unexpected key \"foo\" in cache")
+	}
+	cacheValue3 := newInterQueryCacheValue(ast.StringTerm("bar3").Value, 10)
+	cache.Insert(ast.StringTerm("foo3").Value, cacheValue3)
+	cacheValue4 := newInterQueryCacheValue(ast.StringTerm("bar4").Value, 10)
+	cache.Insert(ast.StringTerm("foo4").Value, cacheValue4)
+	cacheValue5 := newInterQueryCacheValue(ast.StringTerm("bar5").Value, 20)
+	dropped = cache.Insert(ast.StringTerm("foo5").Value, cacheValue5)
+	if dropped != 2 {
+		t.Fatal("Expected dropped to be two")
+	}
+	_, found = cache.Get(ast.StringTerm("foo3").Value)
+	if found {
+		t.Fatal("Unexpected key \"foo3\" in cache")
+	}
+	_, found = cache.Get(ast.StringTerm("foo4").Value)
+	if found {
+		t.Fatal("Unexpected key \"foo4\" in cache")
+	}
+	_, found = cache.Get(ast.StringTerm("foo5").Value)
+	if !found {
+		t.Fatal("Expected key \"foo5\" in cache")
+	}
+
+	// replacing an existing key should not affect cache size
+	cache = NewInterQueryCache(config)
+
+	cacheValue6 := newInterQueryCacheValue(ast.String("bar6"), 10)
+	cache.Insert(ast.String("foo6"), cacheValue6)
+	cache.Insert(ast.String("foo6"), cacheValue6)
+
+	cacheValue7 := newInterQueryCacheValue(ast.String("bar7"), 10)
+	dropped = cache.Insert(ast.StringTerm("foo7").Value, cacheValue7)
+
+	if dropped != 0 {
+		t.Fatal("Expected dropped to be zero")
+	}
+}
+
+func TestConcurrentInsert(t *testing.T) {
+	in := `{"inter_query_builtin_cache": {"max_size_bytes": 20},}` // 20 byte limit for test purposes
+
+	config, err := ParseCachingConfig([]byte(in))
+	if err != nil {
+		t.Fatalf("Unexpected error %v", err)
+	}
+
+	cache := NewInterQueryCache(config)
+
+	cacheValue := newInterQueryCacheValue(ast.String("bar"), 10)
+	cache.Insert(ast.String("foo"), cacheValue)
+
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			cacheValue2 := newInterQueryCacheValue(ast.String("bar2"), 5)
+			cache.Insert(ast.String("foo2"), cacheValue2)
+
+		}()
+	}
+	wg.Wait()
+
+	cacheValue3 := newInterQueryCacheValue(ast.String("bar3"), 5)
+	dropped := cache.Insert(ast.String("foo3"), cacheValue3)
+
+	if dropped != 0 {
+		t.Fatal("Expected dropped to be zero")
+	}
+
+	_, found := cache.Get(ast.String("foo"))
+	if !found {
+		t.Fatal("Expected key \"foo\" in cache")
+	}
+
+	_, found = cache.Get(ast.String("foo2"))
+	if !found {
+		t.Fatal("Expected key \"foo2\" in cache")
+	}
+
+	_, found = cache.Get(ast.String("foo3"))
+	if !found {
+		t.Fatal("Expected key \"foo3\" in cache")
 	}
 }
 

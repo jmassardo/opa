@@ -12,6 +12,7 @@ The package and individual rules in a module can be annotated with a rich set of
 # description: A rule that determines if x is allowed.
 # authors:
 # - John Doe <john@example.com>
+# entrypoint: true
 allow {
   ...
 }
@@ -40,6 +41,7 @@ related_resources | list of URLs | A list of URLs pointing to related resources/
 authors | list of strings | A list of authors for the annotation target. Read more [here](#authors).
 organizations | list of strings | A list of organizations related to the annotation target. Read more [here](#organizations).
 schemas | list of object | A list of associations between value paths and schema definitions. Read more [here](#schemas).
+entrypoint | boolean | Whether or not the annotation target is to be used as a policy entrypoint. Read more [here](#entrypoint).
 custom | mapping of arbitrary data | A custom mapping of named parameters holding arbitrary data. Read more [here](#custom).
 
 ### Scope
@@ -149,7 +151,7 @@ allow {
 
 ```live:rego/metadata/related_resources2:module:read_only
 # METADATA
-# organizations:
+# related_resources:
 # - https://example.com/foo
 # ...
 # - https://example.com/bar
@@ -236,6 +238,14 @@ allow {
 }
 ```
 
+### Entrypoint
+
+The `entrypoint` annotation is a boolean used to mark rules and packages that should be used as entrypoints for a policy.
+This value is false by default, and can only be used at `rule` or `package` scope.
+
+The `build` and `eval` CLI commands will automatically pick up annotated entrypoints; you do not have to specify them with `-e`.
+
+
 ### Custom
 
 The `custom` annotation is a mapping of user-defined data, mapping string keys to arbitrarily typed values.
@@ -261,6 +271,49 @@ allow {
 
 ## Accessing annotations
 
+### Rego
+
+In the example below, you can see how to access an annotation from within a policy.
+
+Given the input:
+
+```live:example/metadata/1:input
+{
+    "number": 11,
+    "subject": {
+        "name": "John doe",
+        "role": "customer"
+    }
+}
+```
+
+The following policy
+
+```live:example/metadata/1:module
+package example
+
+# METADATA
+# title: Deny invalid numbers
+# description: Numbers may not be higher than 5
+# custom:
+#  severity: MEDIUM
+output := decision {
+	input.number > 5
+
+	annotation := rego.metadata.rule()
+	decision := {
+		"severity": annotation.custom.severity,
+		"message": annotation.description,
+	}
+}
+```
+
+will output
+
+```live:example/metadata/1:output
+```
+
+If you'd like more examples and information on this, you can see more here under the [Rego](../policy-reference/#rego) policy reference.
 ### Inspect command
 
 Annotations can be listed through the `inspect` command by using the `-a` flag:

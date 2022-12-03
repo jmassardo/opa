@@ -15,9 +15,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/open-policy-agent/opa/internal/jwx/jwa"
 	"github.com/open-policy-agent/opa/internal/jwx/jws"
 	"github.com/open-policy-agent/opa/internal/jwx/jws/sign"
+	"github.com/open-policy-agent/opa/internal/providers"
 	"github.com/open-policy-agent/opa/internal/uuid"
 	"github.com/open-policy-agent/opa/keys"
 	"github.com/open-policy-agent/opa/logging"
@@ -47,7 +49,7 @@ func DefaultTLSConfig(c Config) (*tls.Config, error) {
 	}
 
 	if c.TLS != nil && c.TLS.CACert != "" {
-		caCert, err := ioutil.ReadFile(c.TLS.CACert)
+		caCert, err := os.ReadFile(c.TLS.CACert)
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +138,7 @@ func (ap *bearerAuthPlugin) Prepare(req *http.Request) error {
 	token := ap.Token
 
 	if ap.TokenPath != "" {
-		bytes, err := ioutil.ReadFile(ap.TokenPath)
+		bytes, err := os.ReadFile(ap.TokenPath)
 		if err != nil {
 			return err
 		}
@@ -355,7 +357,7 @@ func (ap *oauth2ClientCredentialsAuthPlugin) requestToken() (*oauth2Token, error
 		return nil, err
 	}
 
-	bodyRaw, err := ioutil.ReadAll(response.Body)
+	bodyRaw, err := io.ReadAll(response.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +420,7 @@ func (ap *clientTLSAuthPlugin) NewClient(c Config) (*http.Client, error) {
 	}
 
 	var keyPEMBlock []byte
-	data, err := ioutil.ReadFile(ap.PrivateKey)
+	data, err := os.ReadFile(ap.PrivateKey)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +461,7 @@ func (ap *clientTLSAuthPlugin) NewClient(c Config) (*http.Client, error) {
 		keyPEMBlock = data
 	}
 
-	certPEMBlock, err := ioutil.ReadFile(ap.Cert)
+	certPEMBlock, err := os.ReadFile(ap.Cert)
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +479,7 @@ func (ap *clientTLSAuthPlugin) NewClient(c Config) (*http.Client, error) {
 	} else {
 		if ap.CACert != "" {
 			c.logger.Warn("Deprecated 'services[_].credentials.client_tls.ca_cert' configuration specified. Use 'services[_].tls.ca_cert' instead. See https://www.openpolicyagent.org/docs/latest/configuration/#services")
-			caCert, err := ioutil.ReadFile(ap.CACert)
+			caCert, err := os.ReadFile(ap.CACert)
 			if err != nil {
 				return nil, err
 			}
@@ -529,7 +531,7 @@ func (acs *awsCredentialServiceChain) addService(service awsCredentialService) {
 	acs.awsCredentialServices = append(acs.awsCredentialServices, service)
 }
 
-func (acs *awsCredentialServiceChain) credentials() (awsCredentials, error) {
+func (acs *awsCredentialServiceChain) credentials() (providers.AWSCredentials, error) {
 	for _, service := range acs.awsCredentialServices {
 		credential, err := service.credentials()
 		if err == nil {
@@ -542,7 +544,7 @@ func (acs *awsCredentialServiceChain) credentials() (awsCredentials, error) {
 			reflect.TypeOf(service).String(), err)
 	}
 
-	return awsCredentials{}, errors.New("all AWS credential providers failed")
+	return providers.AWSCredentials{}, errors.New("all AWS credential providers failed")
 }
 
 func (ap *awsSigningAuthPlugin) awsCredentialService() awsCredentialService {

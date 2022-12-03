@@ -10,9 +10,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -118,6 +118,147 @@ p = 1`,
 
 		if output.Coverage == nil || output.Coverage.Coverage != 100.0 {
 			t.Fatalf("Expected coverage in output but got: %v", buf.String())
+		}
+	})
+}
+
+func TestEvalWithOptimizeErrors(t *testing.T) {
+	files := map[string]string{
+		"x.rego": `package x
+
+p = 1`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+		if err := params.bundlePaths.Set(path); err != nil {
+			t.Fatal(err)
+		}
+
+		err := validateEvalParams(&params, []string{"data"})
+		if err == nil {
+			t.Fatal("Expected error but got nil")
+		}
+
+		expected := "specify either --data or --bundle flag with optimization level greater than 0"
+		if err.Error() != expected {
+			t.Fatalf("Expected error %v but got %v", expected, err.Error())
+		}
+
+		params = newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+
+		var buf bytes.Buffer
+
+		_, err = eval([]string{"data.test"}, params, &buf)
+		if err == nil {
+			t.Fatal("Expected error but got nil")
+		}
+
+		expected = "bundle optimizations require at least one entrypoint"
+		if err.Error() != expected {
+			t.Fatalf("Expected error %v but got %v", expected, err.Error())
+		}
+	})
+}
+
+func TestEvalWithOptimize(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+			default p = false
+			p { q }
+			q { input.x = data.foo }`,
+		"data.json": `
+			{"foo": 1}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+		params.entrypoints = newrepeatedStringFlag([]string{"test/p"})
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.test.p"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
+		}
+	})
+}
+
+// Ensure that entrypoint annotations don't cause panics when using
+// higher levels of optimization.
+// Reference: https://github.com/open-policy-agent/opa/issues/5368
+func TestEvalIssue5368(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+package system
+
+object_key_exists(object, key) {
+	_ = object[key]
+}
+
+default main = false
+
+# METADATA
+# entrypoint: true
+main := results {
+	object_key_exists(input, "queries")
+	results := {key: result |
+		result := input.queries[key]
+	}
+}`,
+		"input.json": `{}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 2
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+		params.inputPath = filepath.Join(path, "input.json")
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.system.main"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
+		}
+	})
+}
+
+func TestEvalWithOptimizeBundleData(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+			default p = false
+			p { q }
+			q { input.x = data.foo }`,
+		"data.json": `
+			{"foo": 1}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		if err := params.bundlePaths.Set(path); err != nil {
+			t.Fatal(err)
+		}
+		params.entrypoints = newrepeatedStringFlag([]string{"test/p"})
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.test.p"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
 		}
 	})
 }
@@ -574,6 +715,37 @@ func removeBuiltin(builtins []*ast.Builtin, name string) []*ast.Builtin {
 	return cpy
 }
 
+// Nearly identical to TestEvalWithOptimizeBundleData, but uses
+// Rego entrypoint annotations instead of explicitly providing
+// the entrypoints as CLI arguments.
+func TestEvalWithRegoEntrypointAnnotations(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+package test
+default p = false
+# METADATA
+# entrypoint: true
+p { q }
+q { input.x = data.foo }`,
+		"data.json": `
+{"foo": 1}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+		params := newEvalCommandParams()
+		if err := params.bundlePaths.Set(path); err != nil {
+			t.Fatal(err)
+		}
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.test.p"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
+		}
+	})
+}
+
 func TestEvalReturnsRegoError(t *testing.T) {
 	buf := new(bytes.Buffer)
 	_, err := eval([]string{`{k: v | k = ["a", "a"][_]; v = [0,1][_]}`}, newEvalCommandParams(), buf)
@@ -592,9 +764,8 @@ func TestEvalWithBundleData(t *testing.T) {
 	test.WithTempFS(files, func(path string) {
 
 		params := newEvalCommandParams()
-		params.bundlePaths = repeatedStringFlag{
-			v:     []string{path},
-			isSet: true,
+		if err := params.bundlePaths.Set(path); err != nil {
+			t.Fatal(err)
 		}
 
 		var buf bytes.Buffer
@@ -628,12 +799,11 @@ func TestEvalWithBundleDuplicateFileNames(t *testing.T) {
 	test.WithTempFS(files, func(path string) {
 
 		params := newEvalCommandParams()
-		params.bundlePaths = repeatedStringFlag{
-			v: []string{
-				filepath.Join(path, "a"),
-				filepath.Join(path, "b"),
-			},
-			isSet: true,
+		if err := params.bundlePaths.Set(filepath.Join(path, "a")); err != nil {
+			t.Fatal(err)
+		}
+		if err := params.bundlePaths.Set(filepath.Join(path, "b")); err != nil {
+			t.Fatal(err)
 		}
 
 		var buf bytes.Buffer
@@ -891,7 +1061,7 @@ func TestResetExprLocations(t *testing.T) {
 }
 func kubeSchemaServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	bs, err := ioutil.ReadFile("../ast/testdata/_definitions.json")
+	bs, err := os.ReadFile("../ast/testdata/_definitions.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -939,4 +1109,236 @@ time.clock(input.y, time.clock(input.x))
 			}
 		})
 	}
+}
+
+func TestPolicyWithStrictFlag(t *testing.T) {
+	testsShouldError := []struct {
+		note            string
+		policy          string
+		query           string
+		expectedCode    string
+		expectedMessage string
+	}{
+		{
+			note: "strict mode should error on duplicate imports",
+			policy: `package x 
+			import future.keywords.if 
+			import future.keywords.if 
+			foo = 2`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "import must not shadow import future.keywords.if",
+		},
+		{
+			note: "strict mode should error on unused imports",
+			policy: `package x
+			import future.keywords.if
+			import data.foo 
+			foo = 2`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "import data.foo unused",
+		},
+		{
+			note: "strict mode should error when reserved vars data or input is used",
+			policy: `package x
+			import future.keywords.if
+			data if { x = 1}`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "rules must not shadow data (use a different rule name)",
+		},
+	}
+
+	for _, tc := range testsShouldError {
+		t.Run(tc.note, func(t *testing.T) {
+
+			files := map[string]string{
+				"test.rego": tc.policy,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				params.strict = true
+
+				_ = params.dataPaths.Set(filepath.Join(path, "test.rego"))
+
+				var buf bytes.Buffer
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				var output presentation.Output
+				if err := util.NewJSONDecoder(&buf).Decode(&output); err != nil {
+					t.Fatal(err)
+				}
+
+				if code := output.Errors[0].Code; code != tc.expectedCode {
+					t.Errorf("expected code '%v', got '%v'", tc.expectedCode, code)
+				}
+				if msg := output.Errors[0].Message; msg != tc.expectedMessage {
+					t.Errorf("expected message '%v', got '%v'", tc.expectedMessage, msg)
+				}
+			})
+		})
+	}
+
+	testsShouldPass := []struct {
+		note   string
+		policy string
+		query  string
+	}{
+		{
+			note: "This should not error as it is valid",
+			policy: `package x 
+			import future.keywords.if
+			foo = 2`,
+			query: "data.foo",
+		},
+		{
+			note: "Strict mode should not validate the query, only the policy, this should not error",
+			policy: `package x 
+			import future.keywords.if 
+			foo = 2`,
+			query: "x := data.x.foo",
+		},
+	}
+	for _, tc := range testsShouldPass {
+		t.Run(tc.note, func(t *testing.T) {
+
+			files := map[string]string{
+				"test.rego": tc.policy,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				params.strict = true
+
+				var buf bytes.Buffer
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err != nil {
+					t.Errorf("Should not error, got error: '%v'", err)
+				}
+			})
+		})
+	}
+
+}
+
+func TestBundleWithStrictFlag(t *testing.T) {
+	testsShouldError := []struct {
+		note            string
+		policy          string
+		query           string
+		expectedCode    string
+		expectedMessage string
+	}{
+		{
+			note: "strict mode should error on duplicate imports in this bundle",
+			policy: `package x 
+			import future.keywords.if 
+			import future.keywords.if 
+			foo = 2`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "import must not shadow import future.keywords.if",
+		},
+		{
+			note: "strict mode should error on unused imports in this bundle",
+			policy: `package x
+			import future.keywords.if 
+			import data.foo 
+			foo = 2`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "import data.foo unused",
+		},
+		{
+			note: "strict mode should error when reserved vars data or input is used in this bundle",
+			policy: `package x
+			import future.keywords.if 
+			data if { x = 1}`,
+			query:           "data.foo",
+			expectedCode:    "rego_compile_error",
+			expectedMessage: "rules must not shadow data (use a different rule name)",
+		},
+	}
+
+	for _, tc := range testsShouldError {
+		t.Run(tc.note, func(t *testing.T) {
+
+			files := map[string]string{
+				"test.rego": tc.policy,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				if err := params.bundlePaths.Set(path); err != nil {
+					t.Fatal(err)
+				}
+				params.strict = true
+
+				var buf bytes.Buffer
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				var output presentation.Output
+				if err := util.NewJSONDecoder(&buf).Decode(&output); err != nil {
+					t.Fatal(err)
+				}
+
+				if code := output.Errors[0].Code; code != tc.expectedCode {
+					t.Errorf("expected code '%v', got '%v'", tc.expectedCode, code)
+				}
+				if msg := output.Errors[0].Message; msg != tc.expectedMessage {
+					t.Errorf("expected message '%v', got '%v'", tc.expectedMessage, msg)
+				}
+			})
+		})
+	}
+
+	testsShouldPass := []struct {
+		note   string
+		policy string
+		query  string
+	}{
+		{
+			note: "This bundle should not error as it is valid",
+			policy: `package x 
+			import future.keywords.if 
+			foo = 2`,
+			query: "data.foo",
+		},
+		{
+			note: "Strict mode should not validate the query, only the policy, this bundle should not error",
+			policy: `package x 
+			import future.keywords.if 
+			foo = 2`,
+			query: "x := data.x.foo",
+		},
+	}
+	for _, tc := range testsShouldPass {
+		t.Run(tc.note, func(t *testing.T) {
+
+			files := map[string]string{
+				"test.rego": tc.policy,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				if err := params.bundlePaths.Set(path); err != nil {
+					t.Fatal(err)
+				}
+				params.strict = true
+
+				var buf bytes.Buffer
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err != nil {
+					t.Errorf("Should not error, got error: '%v'", err)
+				}
+			})
+		})
+	}
+
 }

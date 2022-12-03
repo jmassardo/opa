@@ -23,6 +23,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/pkg/errors"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
@@ -40,6 +41,7 @@ import (
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/disk"
 	"github.com/open-policy-agent/opa/storage/inmem"
+	"github.com/open-policy-agent/opa/tracing"
 	"github.com/open-policy-agent/opa/util"
 	"github.com/open-policy-agent/opa/util/test"
 	"github.com/open-policy-agent/opa/version"
@@ -2043,13 +2045,23 @@ func TestDataGetExplainFull(t *testing.T) {
 		t.Fatalf("Expected exactly %d events but got %d", nexpect, len(explain))
 	}
 
-	_, ok := explain[2].Node.(ast.Body)
-	if !ok {
-		t.Fatalf("Expected body for node but got: %v", explain[2].Node)
+	exitEvent := -1
+	for i := 0; i < len(explain) && exitEvent < 0; i++ {
+		if explain[i].Op == "exit" {
+			exitEvent = i
+		}
+	}
+	if exitEvent < 0 {
+		t.Fatalf("Expected one exit node but found none")
 	}
 
-	if len(explain[2].Locals) != 1 {
-		t.Fatalf("Expected one binding but got: %v", explain[2].Locals)
+	_, ok := explain[exitEvent].Node.(ast.Body)
+	if !ok {
+		t.Fatalf("Expected body for node but got: %v", explain[exitEvent].Node)
+	}
+
+	if len(explain[exitEvent].Locals) != 1 {
+		t.Fatalf("Expected one binding but got: %v", explain[exitEvent].Locals)
 	}
 
 	req = newReqV1(http.MethodGet, "/data/deadbeef?explain=full", "")
@@ -2067,12 +2079,14 @@ func TestDataGetExplainFull(t *testing.T) {
 	}
 
 	explain = mustUnmarshalTrace(result.Explanation)
-	if len(explain) != 3 {
-		t.Fatalf("Expected exactly 3 events but got %d", len(explain))
+	nexpect = 3
+	if len(explain) != nexpect {
+		t.Fatalf("Expected exactly %d events but got %d", nexpect, len(explain))
 	}
 
-	if explain[2].Op != "fail" {
-		t.Fatalf("Expected last event to be 'fail' but got: %v", explain[2])
+	lastEvent := len(explain) - 1
+	if explain[lastEvent].Op != "fail" {
+		t.Fatalf("Expected last event to be 'fail' but got: %v", explain[lastEvent])
 	}
 
 	req = newReqV1(http.MethodGet, "/data/x?explain=full&pretty=true", "")
@@ -3184,7 +3198,7 @@ func TestDecisionLogging(t *testing.T) {
 			code:   404,
 			response: `{
 				"code": "undefined_document",
-				"message": "document missing or undefined: data.test"
+				"message": "document missing: data.test"
 			  }`,
 		},
 	}
@@ -3392,6 +3406,15 @@ func TestUnversionedPost(t *testing.T) {
 		t.Fatalf("Expected not found before policy added but got %v", f.recorder)
 	}
 
+	expectedBody := `{
+  "code": "undefined_document",
+  "message": "document missing: data.system.main"
+}
+`
+	if f.recorder.Body.String() != expectedBody {
+		t.Errorf("Expected %s got %s", expectedBody, f.recorder.Body.String())
+	}
+
 	module := `
 	package system.main
 
@@ -3411,11 +3434,41 @@ func TestUnversionedPost(t *testing.T) {
 	if f.recorder.Code != 200 || f.recorder.Body.String() != expected {
 		t.Fatalf(`Expected HTTP 200 / %v but got: %v`, expected, f.recorder)
 	}
+
+	module = `
+	package system
+
+	main {
+		input.foo == "bar"
+	}
+	`
+
+	if err := f.v1("PUT", "/policies/test", module, 200, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	f.reset()
+	f.server.Handler.ServeHTTP(f.recorder, func() *http.Request {
+		return newReqUnversioned(http.MethodPost, "/", `{"input": {"foo": "bar"}}`)
+	}())
+
+	if f.recorder.Code != 404 {
+		t.Fatalf("Expected not found before policy added but got %v", f.recorder)
+	}
+
+	expectedBody = `{
+  "code": "undefined_document",
+  "message": "document undefined: data.system.main"
+}
+`
+	if f.recorder.Body.String() != expectedBody {
+		t.Errorf("Expected %s got %s", expectedBody, f.recorder.Body.String())
+	}
 }
 
 func TestQueryV1Explain(t *testing.T) {
 	f := newFixture(t)
-	get := newReqV1(http.MethodGet, `/query?q=a=[1,2,3]%3Ba[i]=x&explain=full`, "")
+	get := newReqV1(http.MethodGet, `/query?q=a=[1,2,3]%3Ba[i]=x&explain=debug`, "")
 	f.server.Handler.ServeHTTP(f.recorder, get)
 
 	if f.recorder.Code != 200 {
@@ -3428,9 +3481,10 @@ func TestQueryV1Explain(t *testing.T) {
 		t.Fatalf("Unexpected JSON decode error: %v", err)
 	}
 
+	nexpect := 21
 	explain := mustUnmarshalTrace(result.Explanation)
-	if len(explain) != 13 {
-		t.Fatalf("Expected exactly 10 trace events for full query but got %d", len(explain))
+	if len(explain) != nexpect {
+		t.Fatalf("Expected exactly %d trace events for full query but got %d", nexpect, len(explain))
 	}
 }
 
@@ -4350,11 +4404,14 @@ func TestDistributedTracingEnabled(t *testing.T) {
 		}}`)
 
 	ctx := context.Background()
-	_, traceOpts, err := distributedtracing.Init(ctx, c, "foo")
+	_, tracerProvider, err := distributedtracing.Init(ctx, c, "foo")
 	if err != nil {
 		t.Fatalf("Unexpected error initializing trace exporter %v", err)
 	}
-
+	traceOpts := tracing.NewOptions(
+		otelhttp.WithTracerProvider(tracerProvider),
+		otelhttp.WithPropagators(propagation.TraceContext{}),
+	)
 	s := New()
 	s.WithDistributedTracingOpts(traceOpts)
 	handler := s.instrumentHandler(writer.HTTPStatus(405), "test")
